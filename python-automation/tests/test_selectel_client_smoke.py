@@ -218,3 +218,101 @@ class TestReleaseDevice:
         )
         # Should not raise — release failures are swallowed and logged
         client.release_device(reserved)
+
+
+# ---------------------------------------------------------------------------
+# HTTP retry / backoff (covering the _request() retry path)
+# ---------------------------------------------------------------------------
+
+class TestHttpRetry:
+    """
+    Verify that _request() retries on HTTP 429/5xx and on network errors,
+    and that the retry logging branch does NOT raise TypeError.
+    """
+
+    def _client(self) -> SelectelFarmClient:
+        client = SelectelFarmClient(api_key="test-key")
+        client._session = MagicMock()
+        return client
+
+    def test_retries_on_429_then_succeeds(self):
+        """429 on first attempt, success on second — should return without raising."""
+        client = self._client()
+        call_count = {"n": 0}
+
+        def side_effect(method, url, **kw):
+            call_count["n"] += 1
+            if call_count["n"] < 2:
+                return _mock_response({}, status_code=429)
+            return _mock_response([DEVICE_RAW])
+
+        client._session.request.side_effect = side_effect
+        # list_devices() calls _get() which calls _request(); should not raise
+        import unittest.mock as _mock
+        with _mock.patch("time.sleep"):
+            devices = client.list_devices()
+        assert len(devices) == 1
+        assert call_count["n"] == 2
+
+    def test_retries_on_503_then_succeeds(self):
+        """503 on first attempt, success on second."""
+        client = self._client()
+        call_count = {"n": 0}
+
+        def side_effect(method, url, **kw):
+            call_count["n"] += 1
+            if call_count["n"] < 2:
+                return _mock_response({}, status_code=503)
+            return _mock_response([DEVICE_RAW])
+
+        client._session.request.side_effect = side_effect
+        import unittest.mock as _mock
+        with _mock.patch("time.sleep"):
+            devices = client.list_devices()
+        assert len(devices) == 1
+        assert call_count["n"] == 2
+
+    def test_raises_after_all_retries_on_5xx(self):
+        """Always 503 — should raise RuntimeError after exhausting retries."""
+        import requests as _requests
+        import unittest.mock as _mock
+        client = self._client()
+        # All attempts return 503
+        error_resp = _mock_response({}, status_code=503)
+        error_resp.raise_for_status.side_effect = _requests.HTTPError("503 Server Error")
+        client._session.request.return_value = error_resp
+
+        with _mock.patch("time.sleep"):
+            with pytest.raises((RuntimeError, _requests.HTTPError)):
+                client.list_devices()
+
+    def test_retries_on_connection_error_then_succeeds(self):
+        """ConnectionError on first attempt, success on second."""
+        import requests as _requests
+        client = self._client()
+        call_count = {"n": 0}
+
+        def side_effect(method, url, **kw):
+            call_count["n"] += 1
+            if call_count["n"] < 2:
+                raise _requests.ConnectionError("connection refused")
+            return _mock_response([DEVICE_RAW])
+
+        client._session.request.side_effect = side_effect
+        # Patch time.sleep globally to avoid real delays in tests
+        import unittest.mock as _mock
+        with _mock.patch("time.sleep"):
+            devices = client.list_devices()
+        assert len(devices) == 1
+        assert call_count["n"] == 2
+
+    def test_raises_after_all_retries_on_network_error(self):
+        """Always ConnectionError — should raise RuntimeError after exhausting retries."""
+        import requests as _requests
+        client = self._client()
+        client._session.request.side_effect = _requests.ConnectionError("always down")
+
+        import unittest.mock as _mock
+        with _mock.patch("time.sleep"):
+            with pytest.raises(RuntimeError, match="failed after"):
+                client.list_devices()

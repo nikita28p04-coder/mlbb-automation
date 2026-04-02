@@ -262,12 +262,8 @@ class SelectelFarmClient(DeviceFarmClient):
                 if resp.status_code in self._RETRYABLE_STATUS and attempt < self._HTTP_RETRIES:
                     delay = self._HTTP_RETRY_DELAY * (2 ** (attempt - 1))
                     logger.warning(
-                        "Selectel API transient error, retrying",
-                        method=method,
-                        path=path,
-                        status=resp.status_code,
-                        attempt=attempt,
-                        retry_in=delay,
+                        "Selectel API transient error, retrying: %s %s status=%s attempt=%d retry_in=%.1fs",
+                        method, path, resp.status_code, attempt, delay,
                     )
                     _time.sleep(delay)
                     continue
@@ -278,12 +274,8 @@ class SelectelFarmClient(DeviceFarmClient):
                 if attempt < self._HTTP_RETRIES:
                     delay = self._HTTP_RETRY_DELAY * (2 ** (attempt - 1))
                     logger.warning(
-                        "Selectel API network error, retrying",
-                        method=method,
-                        path=path,
-                        error=str(exc),
-                        attempt=attempt,
-                        retry_in=delay,
+                        "Selectel API network error, retrying: %s %s error=%s attempt=%d retry_in=%.1fs",
+                        method, path, exc, attempt, delay,
                     )
                     _time.sleep(delay)
                 else:
