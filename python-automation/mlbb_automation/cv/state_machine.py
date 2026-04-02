@@ -273,6 +273,35 @@ class StateMachine:
             return action
 
         self._transitions = [
+            # ------------------------------------------------------------------
+            # Google account flow
+            #
+            # GOOGLE_LOGIN is reached when MLBB prompts for Google sign-in.
+            # The scenario layer (google_account.py) must have already typed
+            # the email address and password into the focused input; this
+            # transition taps "Next" / "Sign in" to submit the last form.
+            # After submission the device shows the MLBB loading screen.
+            # ------------------------------------------------------------------
+            T(
+                ScreenState.GOOGLE_LOGIN,
+                ScreenState.MLBB_LOADING,
+                action=_find_and_tap("Next", template_name="google_sign_in_button"),
+                label="google_login_submit",
+            ),
+            # GOOGLE_2FA should not occur (account has no 2FA per requirements).
+            # Recovery: tap "Cancel" to abort the 2FA screen and return the user
+            # to Google login, from which the scenario can re-authenticate.
+            T(
+                ScreenState.GOOGLE_2FA,
+                ScreenState.GOOGLE_LOGIN,
+                action=_find_and_tap("Cancel"),
+                label="google_2fa_cancel",
+            ),
+
+            # ------------------------------------------------------------------
+            # MLBB core navigation
+            # ------------------------------------------------------------------
+
             # MLBB loading → main menu: wait for loading animation to finish
             T(
                 ScreenState.MLBB_LOADING,
@@ -315,7 +344,12 @@ class StateMachine:
                 action=_find_and_tap("Pay", template_name="google_pay_logo"),
                 label="confirm_payment",
             ),
-            # Recovery: press Home and wait for MLBB main menu
+
+            # ------------------------------------------------------------------
+            # Recovery edges
+            # ------------------------------------------------------------------
+
+            # From any unknown screen: press Home and wait for MLBB main menu
             T(
                 ScreenState.UNKNOWN,
                 ScreenState.MLBB_MAIN_MENU,

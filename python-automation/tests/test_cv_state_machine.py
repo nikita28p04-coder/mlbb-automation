@@ -186,6 +186,62 @@ class TestTransitionExecution:
 
 
 # ---------------------------------------------------------------------------
+# Google login / 2FA transitions
+# ---------------------------------------------------------------------------
+
+class TestGoogleLoginTransitions:
+    def test_bfs_finds_path_from_google_login_to_mlbb_main_menu(self):
+        """
+        The full path GOOGLE_LOGIN → MLBB_LOADING → MLBB_MAIN_MENU must be
+        discoverable via BFS using the registered default transitions.
+        """
+        exe = _mock_executor()
+        machine = _make_machine(
+            exe,
+            detect_sequence=[
+                ScreenState.GOOGLE_LOGIN,
+                ScreenState.MLBB_LOADING,
+                ScreenState.MLBB_MAIN_MENU,
+            ],
+        )
+        # find_element always "succeeds" so transition actions don't error
+        exe.find_element.return_value = (100, 200)
+        machine.navigate_to(ScreenState.MLBB_MAIN_MENU)
+
+    def test_bfs_finds_path_from_google_2fa_to_mlbb_main_menu(self):
+        """
+        GOOGLE_2FA → GOOGLE_LOGIN → MLBB_LOADING → MLBB_MAIN_MENU
+        must be reachable via the cancel recovery + login transitions.
+        """
+        exe = _mock_executor()
+        machine = _make_machine(
+            exe,
+            detect_sequence=[
+                ScreenState.GOOGLE_2FA,
+                ScreenState.GOOGLE_LOGIN,
+                ScreenState.MLBB_LOADING,
+                ScreenState.MLBB_MAIN_MENU,
+            ],
+        )
+        exe.find_element.return_value = (100, 200)
+        machine.navigate_to(ScreenState.MLBB_MAIN_MENU)
+
+    def test_no_path_from_payment_success_to_google_login(self):
+        """
+        After payment succeeds there is no transition back to GOOGLE_LOGIN —
+        these are terminal / one-directional states.
+        """
+        exe = _mock_executor()
+        machine = _make_machine(
+            exe,
+            detect_sequence=[ScreenState.PAYMENT_SUCCESS],
+        )
+        exe.find_element.return_value = (100, 200)
+        with pytest.raises(NavigationError, match="No path"):
+            machine.navigate_to(ScreenState.GOOGLE_LOGIN)
+
+
+# ---------------------------------------------------------------------------
 # Strict no-fallback behaviour
 # ---------------------------------------------------------------------------
 
