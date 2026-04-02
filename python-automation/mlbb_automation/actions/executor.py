@@ -508,4 +508,33 @@ class AppiumExecutor:
                         error=str(exc),
                     )
                     time.sleep(wait * (2 ** (attempt - 1)))  # exponential backoff
+                else:
+                    # All retries exhausted — capture a screenshot to aid debugging
+                    self._capture_failure_screenshot(exc)
+
         raise last_exc  # type: ignore[misc]
+
+    def _capture_failure_screenshot(self, exc: Exception) -> None:
+        """
+        Attempt to save a screenshot when all retries are exhausted.
+
+        This is best-effort: screenshot failures are logged as warnings
+        and never propagated to the caller.
+        """
+        if self._run_logger is None:
+            return
+        try:
+            img = self._driver.get_screenshot_as_png() if self._driver else None
+            if img:
+                from PIL import Image
+                import io as _io
+                pil_image = Image.open(_io.BytesIO(img))
+                label = f"action_failure_{type(exc).__name__}"
+                self._run_logger.save_screenshot(pil_image, label=label)
+                logger.debug("Saved failure screenshot", label=label)
+        except Exception as capture_exc:
+            logger.warning(
+                "Failed to capture failure screenshot",
+                original_error=str(exc),
+                capture_error=str(capture_exc),
+            )

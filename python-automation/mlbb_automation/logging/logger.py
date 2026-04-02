@@ -31,25 +31,15 @@ def _configure_structlog(log_level: str = "INFO", log_file: Optional[Path] = Non
 
     Args:
         log_level: Minimum log level string (DEBUG/INFO/WARNING/ERROR).
-        log_file:  If provided, attach a rotating file handler (10 MB × 5 backups).
+        log_file:  Unused — kept for signature compatibility only. File handlers are
+                   attached separately via _attach_rotating_file_handler to support
+                   late binding after module-level loggers have already been created.
     """
     level = getattr(logging, log_level.upper(), logging.INFO)
 
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
-
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        rotating = logging.handlers.RotatingFileHandler(
-            filename=str(log_file),
-            maxBytes=10 * 1024 * 1024,  # 10 MB per file
-            backupCount=5,
-            encoding="utf-8",
-        )
-        handlers.append(rotating)
-
     logging.basicConfig(
         format="%(message)s",
-        handlers=handlers,
+        stream=sys.stdout,
         level=level,
     )
 
@@ -71,6 +61,7 @@ def _configure_structlog(log_level: str = "INFO", log_file: Optional[Path] = Non
 
 
 _configured = False
+_file_handler_attached = False
 
 
 def get_logger(
@@ -79,18 +70,50 @@ def get_logger(
     log_file: Optional[Path] = None,
 ) -> structlog.stdlib.BoundLogger:
     """
-    Return a named structlog logger. Configures structlog on first call.
+    Return a named structlog logger.
+
+    On first call, fully initialises structlog (processors, renderer, stdlib bridge).
+    On any subsequent call that provides *log_file* for the first time, the rotating
+    file handler is added to the root logger so it is picked up by all existing
+    loggers — including those created before the CLI ran.
 
     Args:
         name:      Logger name, typically __name__ of the calling module.
         log_level: Minimum log level (DEBUG/INFO/WARNING/ERROR).
         log_file:  Optional path to a rotating log file (10 MB × 5 backups).
     """
-    global _configured
+    global _configured, _file_handler_attached
+
     if not _configured:
-        _configure_structlog(log_level, log_file=log_file)
+        _configure_structlog(log_level, log_file=None)  # no file on initial call
         _configured = True
+
+    if log_file is not None and not _file_handler_attached:
+        # Late-attach a rotating file handler so the CLI can wire it up
+        # after structlog has already been configured by module-level imports.
+        _attach_rotating_file_handler(log_file, log_level)
+        _file_handler_attached = True
+
     return structlog.get_logger(name)
+
+
+def _attach_rotating_file_handler(log_file: Path, log_level: str = "INFO") -> None:
+    """
+    Add a RotatingFileHandler to the root stdlib logger.
+
+    Safe to call once after `_configure_structlog` has already run.
+    """
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    rotating = logging.handlers.RotatingFileHandler(
+        filename=str(log_file),
+        maxBytes=10 * 1024 * 1024,  # 10 MB per file
+        backupCount=5,
+        encoding="utf-8",
+    )
+    rotating.setLevel(level)
+    root = logging.getLogger()
+    root.addHandler(rotating)
 
 
 class RunLogger:

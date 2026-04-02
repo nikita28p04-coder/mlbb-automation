@@ -1,2 +1,0 @@
-[console_scripts]
-mlbb-automation = mlbb_automation.__main__:cli
