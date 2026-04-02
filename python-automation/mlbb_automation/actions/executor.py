@@ -364,15 +364,21 @@ class AppiumExecutor:
     # App management
     # ------------------------------------------------------------------
 
-    def install_app(self, apk_path: str) -> None:
+    def install_app(self, apk_path_or_url: str) -> None:
         """
-        Install an APK on the device.
+        Install an APK on the device from a local path or a remote URL.
+
+        The Appium UiAutomator2 driver natively supports both local file paths
+        and HTTP(S) URLs — pass either and the driver will handle the download
+        and installation transparently.
 
         Args:
-            apk_path: Local path to the APK file.
+            apk_path_or_url: Local path (e.g. '/tmp/app.apk') OR a remote URL
+                             (e.g. 'https://example.com/app.apk').
         """
-        logger.info("install_app", apk=apk_path)
-        self._retry(lambda: self.driver.install_app(apk_path))
+        logger.info("install_app", apk=apk_path_or_url)
+        self._retry(lambda: self.driver.install_app(apk_path_or_url))
+        self._record_action("install_app", apk=apk_path_or_url)
 
     def launch_app(self, package: str, activity: Optional[str] = None) -> None:
         """
