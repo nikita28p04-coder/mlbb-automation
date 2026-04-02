@@ -98,12 +98,13 @@ def run(
     run_logger = RunLogger(run_id=run_id, log_dir=settings.log_dir, log_level=settings.log_level)
 
     reserved = None
+    executor = None
     success = False
     try:
         # 1. Acquire device
         click.echo("Acquiring device from Selectel farm...")
         run_logger.log_step("acquire_device", "started")
-        
+
         if device_id:
             # Acquire a specific device by ID — verify it is available first
             available = farm_client.list_devices()
@@ -127,14 +128,15 @@ def run(
         click.echo(f"Reserved device: {reserved.device_info.model} (id={reserved.device_info.id})")
 
         # 2. Start Appium session and run scenario
-        with AppiumExecutor(
+        executor = AppiumExecutor(
             reserved,
             retry_count=settings.retry_count,
             retry_delay=settings.retry_delay_seconds,
             action_timeout=settings.action_timeout_seconds,
             device_id=reserved.device_info.id,
             run_logger=run_logger,
-        ) as executor:
+        )
+        with executor:
             recovery = RecoveryManager(
                 executor=executor,
                 app_package="com.mobile.legends",
@@ -157,12 +159,12 @@ def run(
     except Exception as exc:
         logger.error("Run failed", error=str(exc), exc_info=True)
         click.echo(f"\nRUN FAILED: {exc}", err=True)
-        if settings.save_screenshots_on_error and 'executor' in dir():
+        if settings.save_screenshots_on_error and executor is not None:
             try:
                 img = executor.screenshot()
                 run_logger.save_screenshot(img, label="fatal_error")
-            except Exception:
-                pass
+            except Exception as screenshot_exc:
+                logger.warning("Failed to save error screenshot", error=str(screenshot_exc))
     finally:
         if reserved and farm_client:
             click.echo("Releasing device...")

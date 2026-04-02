@@ -64,9 +64,12 @@ class SelectelFarmClient(DeviceFarmClient):
         api_key: str,
         base_url: str = "https://mf.selectel.ru/api/v1",
         timeout: int = 30,
+        appium_url_override: Optional[str] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        # When set, this URL always overrides whatever the farm API returns.
+        self._appium_url_override: Optional[str] = appium_url_override
         self._session: Session = requests.Session()
         self._session.headers.update(
             {
@@ -115,12 +118,9 @@ class SelectelFarmClient(DeviceFarmClient):
         Returns:
             ReservedDevice ready for an Appium session.
         """
-        # Fetch full device info to populate capabilities
-        all_devices = self.list_devices()
-        all_devices_all_statuses = self._list_all_devices()
-        target = next(
-            (d for d in all_devices_all_statuses if d.id == device_id), None
-        )
+        # Fetch all devices (regardless of status) to resolve by ID
+        all_devices = self._list_all_devices()
+        target = next((d for d in all_devices if d.id == device_id), None)
         if target is None:
             raise RuntimeError(f"Device '{device_id}' not found in farm")
 
@@ -161,12 +161,19 @@ class SelectelFarmClient(DeviceFarmClient):
         # Parse Appium URL and capabilities from the response.
         # Selectel typically returns something like:
         #   { "appiumUrl": "https://...", "capabilities": {...}, "sessionId": "..." }
-        appium_url: str = (
+        # Priority: config override > farm response > URL-based fallback
+        farm_appium_url: str = (
             data.get("appiumUrl")
             or data.get("appium_url")
             or data.get("url")
             or f"{self._base_url}/wd/hub"  # fallback guess
         )
+        appium_url: str = self._appium_url_override or farm_appium_url
+        if self._appium_url_override:
+            logger.info(
+                "Using appium_url override from config (ignoring farm response): %s",
+                appium_url,
+            )
 
         raw_caps: dict = data.get("capabilities") or data.get("desiredCapabilities") or {}
         capabilities = {
@@ -248,9 +255,15 @@ class SelectelFarmClient(DeviceFarmClient):
 
 
 def create_client_from_settings(settings) -> SelectelFarmClient:
-    """Convenience factory — creates a SelectelFarmClient from a Settings object."""
+    """
+    Convenience factory — creates a SelectelFarmClient from a Settings object.
+
+    Propagates settings.appium_url as an override so any Appium URL returned
+    by the farm is replaced with the value from configuration.
+    """
     return SelectelFarmClient(
         api_key=settings.selectel_api_key,
         base_url=settings.selectel_api_url,
         timeout=settings.action_timeout_seconds,
+        appium_url_override=settings.appium_url,  # None → no override
     )

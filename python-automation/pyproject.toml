@@ -1,12 +1,12 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlbb-automation"
 version = "0.1.0"
 description = "Android device farm automation for Mobile Legends: Bang Bang"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "Appium-Python-Client>=3.1.0",
     "requests>=2.31.0",
