@@ -90,8 +90,37 @@ _SMALL_PACK_SIGNALS = (
 # Timeouts
 _SHOP_TIMEOUT = 30
 _PAYMENT_SHEET_TIMEOUT = 30
+_AUTH_TIMEOUT = 20      # seconds to wait for PIN/biometric prompt to appear or clear
 _RESULT_TIMEOUT = 60
 _POLL_INTERVAL = 2.0
+
+# OCR signals indicating a device-auth screen is showing after Google Pay
+_PIN_SIGNALS = (
+    "enter pin",
+    "введите pin",
+    "введите пин",
+    "enter your pin",
+    "device pin",
+    "confirm with",
+    "подтвердите с помощью",
+)
+_BIOMETRIC_SIGNALS = (
+    "fingerprint",
+    "отпечаток",
+    "face unlock",
+    "распознавание лица",
+    "touch sensor",
+    "биометрия",
+    "use fingerprint",
+)
+# Signals that indicate the auth prompt resolved (either success or dismiss)
+_AUTH_DISMISSED_SIGNALS = (
+    "cancel",
+    "use pin instead",
+    "use password instead",
+    "вместо этого",
+    "отмена",
+)
 
 
 class StepError(Exception):
@@ -140,7 +169,11 @@ def run(
         run_logger.log_step("payment", "dry_run_ok", device_id=device_id)
         return
 
-    # Step 6: Detect result
+    # Step 6: Handle device auth (PIN / biometric) if Google Pay requires it
+    # This is expected on many devices and must be handled before result detection.
+    _handle_device_auth(executor, run_logger, device_id)
+
+    # Step 7: Detect result
     result = _detect_payment_result(executor, run_logger, device_id)
 
     if result == "success":
@@ -497,6 +530,217 @@ def _try_confirm_payment_webview(
     executor.switch_to_native()
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Device authentication handling (PIN / biometric)
+# ---------------------------------------------------------------------------
+
+def _handle_device_auth(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+) -> None:
+    """
+    Handle device authentication prompts that Google Pay may present after the
+    user taps the Pay button.
+
+    Google Pay on Android may require device authentication (PIN, biometric)
+    to confirm a payment.  This function:
+
+      1. Checks if a PIN or biometric prompt is visible.
+      2. If biometric (fingerprint / face unlock): taps "Use PIN instead" or
+         similar fallback to switch to PIN entry, then enters the PIN.
+      3. If PIN keypad is visible: enters the PIN one digit at a time using
+         Appium key-press events.
+      4. If no auth prompt is detected within _AUTH_TIMEOUT, assumes auth was
+         not required (or was already handled) and returns silently.
+
+    PIN is read from environment variable ``PAYMENT_PIN``.  If not set,
+    biometric prompts are dismissed via the cancel/fallback path and the flow
+    continues (the device may complete auth automatically in a test environment,
+    or skip auth entirely if the Google account is configured to do so).
+    """
+    import os
+    from ...cv.ocr import OcrEngine
+
+    ocr = OcrEngine()
+    device_pin = os.environ.get("PAYMENT_PIN", "")
+
+    logger.info("Checking for device auth prompt after Google Pay", device_id=device_id)
+    run_logger.log_step("payment", "device_auth_check", device_id=device_id)
+
+    deadline = time.monotonic() + _AUTH_TIMEOUT
+    biometric_dismissed = False
+
+    while time.monotonic() < deadline:
+        img = executor.screenshot()
+        results = ocr.read_region(img)
+        texts = " ".join(r.text.lower() for r in results)
+
+        is_pin_prompt = any(s in texts for s in _PIN_SIGNALS)
+        is_biometric = any(s in texts for s in _BIOMETRIC_SIGNALS)
+
+        if not is_pin_prompt and not is_biometric:
+            # No auth prompt visible — either not required or already resolved
+            logger.info(
+                "No device auth prompt detected — proceeding",
+                device_id=device_id,
+            )
+            return
+
+        # ── Biometric prompt handling ──────────────────────────────────────
+        if is_biometric and not biometric_dismissed:
+            run_logger.save_screenshot(img, label="biometric_prompt")
+            logger.info("Biometric auth prompt detected", device_id=device_id)
+
+            if device_pin:
+                # Try to switch to PIN entry so we can enter the PIN
+                _fallback_to_pin(executor, run_logger, device_id)
+                biometric_dismissed = True
+                time.sleep(1)
+                continue
+            else:
+                # No PIN configured — try to cancel/dismiss the biometric prompt
+                logger.warning(
+                    "PAYMENT_PIN not configured; attempting to cancel biometric prompt",
+                    device_id=device_id,
+                )
+                _cancel_auth_prompt(executor, run_logger, device_id)
+                run_logger.log_step(
+                    "payment", "device_auth_skipped_no_pin", device_id=device_id
+                )
+                return
+
+        # ── PIN prompt handling ────────────────────────────────────────────
+        if is_pin_prompt:
+            run_logger.save_screenshot(img, label="pin_prompt")
+            logger.info("PIN auth prompt detected", device_id=device_id)
+
+            if device_pin:
+                _enter_pin(executor, run_logger, device_id, device_pin)
+                run_logger.log_step(
+                    "payment", "device_auth_pin_entered", device_id=device_id
+                )
+                # Wait a moment for the auth to process
+                time.sleep(2)
+                return
+            else:
+                # No PIN — cancel the prompt and let payment result detection
+                # handle whatever state we land in
+                logger.warning(
+                    "PAYMENT_PIN not configured; cancelling PIN prompt",
+                    device_id=device_id,
+                )
+                _cancel_auth_prompt(executor, run_logger, device_id)
+                run_logger.log_step(
+                    "payment", "device_auth_skipped_no_pin", device_id=device_id
+                )
+                return
+
+        time.sleep(_POLL_INTERVAL)
+
+    # Timed out waiting for auth to resolve — log and continue; result
+    # detection will observe whatever state the device is in.
+    logger.warning(
+        "Device auth check timed out — proceeding to result detection",
+        device_id=device_id,
+    )
+    run_logger.log_step("payment", "device_auth_timeout", device_id=device_id)
+
+
+def _fallback_to_pin(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+) -> None:
+    """Tap the 'Use PIN instead' / 'Use password instead' button on a biometric prompt."""
+    _fallback_labels = (
+        "Use PIN instead",
+        "Use password instead",
+        "Use pattern instead",
+        "Использовать PIN",
+        "Вместо этого",
+    )
+    for label in _fallback_labels:
+        try:
+            x, y = executor.find_element(label, retries=2)
+            executor.tap(x, y)
+            logger.info(
+                "Tapped biometric fallback button",
+                label=label,
+                device_id=device_id,
+            )
+            return
+        except RuntimeError:
+            continue
+
+    logger.warning(
+        "Could not find biometric fallback button — staying on biometric prompt",
+        device_id=device_id,
+    )
+
+
+def _enter_pin(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+    pin: str,
+) -> None:
+    """Enter a numeric PIN on the device keypad, then confirm with OK/Enter."""
+    logger.info("Entering device PIN", pin_length=len(pin), device_id=device_id)
+
+    for digit in pin:
+        # Try to find the digit button on the keypad by its text label
+        try:
+            x, y = executor.find_element(digit, retries=2)
+            executor.tap(x, y)
+            time.sleep(0.15)
+        except RuntimeError:
+            # Fall back to key-press events (numeric keyboard)
+            executor.press_key(int(digit) + 7)  # KEYCODE_0=7, KEYCODE_1=8, …
+            time.sleep(0.15)
+
+    # Confirm the PIN — try "OK", "Confirm", or Enter key
+    _ok_labels = ("OK", "Confirm", "Done", "ОК", "Готово")
+    confirmed = False
+    for label in _ok_labels:
+        try:
+            x, y = executor.find_element(label, retries=1)
+            executor.tap(x, y)
+            confirmed = True
+            break
+        except RuntimeError:
+            continue
+
+    if not confirmed:
+        # Press Enter (KEYCODE_ENTER = 66)
+        executor.press_key(66)
+
+    logger.info("PIN entered and confirmed", device_id=device_id)
+
+
+def _cancel_auth_prompt(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+) -> None:
+    """Cancel / dismiss an auth prompt (when no PIN is configured)."""
+    _cancel_labels = ("Cancel", "Отмена", "Skip", "Пропустить")
+    for label in _cancel_labels:
+        try:
+            x, y = executor.find_element(label, retries=2)
+            executor.tap(x, y)
+            logger.info("Auth prompt cancelled", label=label, device_id=device_id)
+            return
+        except RuntimeError:
+            continue
+
+    # Press Back as last resort
+    executor.press_back()
+    logger.warning(
+        "Auth prompt not cancelled via button — pressed Back", device_id=device_id
+    )
 
 
 # ---------------------------------------------------------------------------

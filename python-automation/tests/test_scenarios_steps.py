@@ -469,6 +469,167 @@ class TestDetectPaymentResult:
         assert result == "timeout"
 
 
+class TestDeviceAuthHandling:
+    """Tests for _handle_device_auth, _enter_pin, _fallback_to_pin, _cancel_auth_prompt."""
+
+    def test_no_auth_prompt_returns_immediately(self, tmp_path):
+        """When no PIN/biometric prompt is visible, _handle_device_auth returns silently."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+
+        # OCR returns generic text (no auth signals)
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("loading")]), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # No taps should have been needed
+        exe.tap.assert_not_called()
+
+    def test_pin_prompt_enters_pin_from_env(self, tmp_path, monkeypatch):
+        """When PIN prompt is detected and PAYMENT_PIN is set, digits are entered."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.setenv("PAYMENT_PIN", "1234")
+
+        # find_element succeeds for each digit button
+        exe.find_element.return_value = (100, 200)
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("Enter PIN")]), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # 4 digit taps + 1 OK tap (at minimum)
+        assert exe.tap.call_count >= 4
+
+    def test_pin_prompt_uses_key_press_when_button_not_found(self, tmp_path, monkeypatch):
+        """Falls back to press_key when digit button not found by find_element."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.setenv("PAYMENT_PIN", "42")
+
+        # find_element raises for digit buttons but succeeds for OK
+        call_n = [0]
+        def flaky_find(label, **kwargs):
+            call_n[0] += 1
+            if label.isdigit():
+                raise RuntimeError("not found")
+            return (100, 200)
+        exe.find_element.side_effect = flaky_find
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("Enter PIN")]), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # press_key called for each digit
+        assert exe.press_key.call_count >= 2
+
+    def test_biometric_prompt_falls_back_to_pin(self, tmp_path, monkeypatch):
+        """Biometric prompt → taps 'Use PIN instead', then enters PIN."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.setenv("PAYMENT_PIN", "0000")
+
+        ocr_seq = iter([
+            [_ocr("Fingerprint")],          # first iteration — biometric
+            [_ocr("Enter PIN")],            # after fallback — PIN prompt
+        ])
+
+        exe.find_element.return_value = (100, 200)
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   side_effect=lambda *a, **kw: next(ocr_seq, [_ocr("done")])), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # find_element was called (for fallback button + digit buttons)
+        assert exe.find_element.call_count >= 1
+
+    def test_no_pin_cancels_biometric_prompt(self, tmp_path, monkeypatch):
+        """When PAYMENT_PIN is not set, biometric prompt is cancelled."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.delenv("PAYMENT_PIN", raising=False)
+
+        exe.find_element.return_value = (100, 200)
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("Fingerprint")]), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # Should have attempted to tap Cancel or pressed Back
+        assert exe.tap.call_count >= 1 or exe.press_back.call_count >= 1
+
+    def test_auth_timeout_logs_and_continues(self, tmp_path, monkeypatch):
+        """When auth never resolves, times out and continues without error."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.delenv("PAYMENT_PIN", raising=False)
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("Enter PIN")]), \
+             patch("mlbb_automation.scenarios.steps.payment._AUTH_TIMEOUT", 0), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.side_effect = [0, 9999]  # immediately past deadline
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            # Should not raise
+            _handle_device_auth(exe, run_logger, "d1")
+
+    def test_enter_pin_calls_ok_to_confirm(self, tmp_path):
+        """_enter_pin taps an OK button after entering all digits."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        exe.find_element.return_value = (50, 50)
+
+        with patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _enter_pin
+            _enter_pin(exe, run_logger, "d1", "123")
+
+        # 3 digit taps + 1 OK tap
+        assert exe.tap.call_count >= 4
+
+    def test_run_calls_handle_device_auth_before_result_detection(self, tmp_path):
+        """Full run() must call _handle_device_auth between payment confirm and result detection."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+
+        call_order = []
+
+        with patch("mlbb_automation.scenarios.steps.payment._open_shop"), \
+             patch("mlbb_automation.scenarios.steps.payment._open_diamonds_section"), \
+             patch("mlbb_automation.scenarios.steps.payment._select_smallest_package"), \
+             patch("mlbb_automation.scenarios.steps.payment._tap_buy"), \
+             patch("mlbb_automation.scenarios.steps.payment._handle_google_pay"), \
+             patch("mlbb_automation.scenarios.steps.payment._handle_device_auth",
+                   side_effect=lambda *a, **kw: call_order.append("auth")), \
+             patch("mlbb_automation.scenarios.steps.payment._detect_payment_result",
+                   side_effect=lambda *a, **kw: (call_order.append("detect"), "success")[1]):
+            from mlbb_automation.scenarios.steps import payment
+            payment.run(exe, run_logger, "d1", dry_run=False)
+
+        assert call_order.index("auth") < call_order.index("detect")
+
+
 class TestGoogleAccountVerification:
     """Enforce that account verification failure raises StepError."""
 
