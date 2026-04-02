@@ -120,18 +120,36 @@ python-automation/mlbb_automation/
 │   ├── base.py                 # Abstract DeviceFarmClient interface
 │   └── selectel_client.py      # Selectel Mobile Farm REST API client
 ├── actions/executor.py         # Appium WebDriver action wrapper (tap, swipe, type, etc.)
+├── cv/
+│   ├── ocr.py                  # EasyOCR wrapper (OcrEngine, OcrResult)
+│   ├── template_matcher.py     # Multi-scale template matching (TemplateMatcher)
+│   ├── screen_detector.py      # 11-state ScreenDetector (OCR + template signals)
+│   └── state_machine.py        # BFS-based StateMachine for screen navigation
 ├── logging/logger.py           # Structlog JSON logger + RunLogger (artifacts, screenshots)
 ├── recovery/manager.py         # Freeze detection + auto-recovery watchdog
-└── scenarios/steps/            # Scenario steps (full impl in Task #2 & #3)
-    ├── google_account.py       # Add Google account to device
-    ├── install_mlbb.py         # Install MLBB from Google Play
-    ├── mlbb_onboarding.py      # Skip onboarding, reach main menu
-    └── payment.py              # Shop → Diamonds → Google Pay payment
+└── scenarios/
+    ├── engine.py               # ScenarioRunner: sequential steps, retry, recovery, checkpoints
+    ├── watchdog.py             # Background popup-dismissal watchdog
+    └── steps/
+        ├── google_account.py   # Full: Settings → Add Account → Google (email+password, no 2FA)
+        ├── install_mlbb.py     # Full: Play Store install + launch (idempotent)
+        ├── mlbb_onboarding.py  # Full: Skip intro/tutorial, reach main menu
+        └── payment.py          # Full: Shop → Diamonds → Google Pay → result detection
+```
+
+**CLI:**
+```
+python -m mlbb_automation run --config config.yaml           # Full scenario
+python -m mlbb_automation run --config config.yaml --dry-run # Navigate to payment, skip tap
+python -m mlbb_automation run --config config.yaml --step google_account  # Single step
+python -m mlbb_automation devices --config config.yaml       # List farm devices
 ```
 
 **Config file:** `python-automation/config.example.yaml` — copy to `config.yaml` and fill in credentials.
 
 **Artifacts per run:** `run_artifacts/<run_id>/` — `events.jsonl`, `report.json`, `screenshots/`
+
+**Test suite:** 122 tests in `python-automation/tests/` — `python -m pytest tests/ -v`
 
 **Key design decisions:**
 - Selectel farm uses Appium (WebDriver) protocol, not raw ADB
@@ -139,3 +157,7 @@ python-automation/mlbb_automation/
 - Abstract `DeviceFarmClient` base allows swapping providers
 - All actions retry 3x with exponential backoff on StaleElement/Timeout
 - RecoveryManager detects screen freezes via image hash comparison
+- ScenarioRunner: per-step retry + RecoveryManager recovery + checkpoint screenshots
+- find_element() 4-stage strategy: template → OCR → Appium @text → content-desc
+- Google Pay: probes NATIVE_APP then each WEBVIEW context for the Pay button
+- dry_run mode navigates to payment screen but skips the final Pay tap

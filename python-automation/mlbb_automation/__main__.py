@@ -4,6 +4,8 @@ CLI entry point for mlbb_automation.
 Usage:
     python -m mlbb_automation --help
     python -m mlbb_automation run --config config.yaml
+    python -m mlbb_automation run --config config.yaml --dry-run
+    python -m mlbb_automation run --config config.yaml --step google_account
     python -m mlbb_automation devices --config config.yaml
 """
 
@@ -77,7 +79,8 @@ def run(
     Run the full MLBB automation scenario:
       1. Add Google account to device
       2. Install Mobile Legends: Bang Bang
-      3. Navigate to shop and make a real payment via Google Pay
+      3. Skip onboarding and reach main menu
+      4. Navigate to shop and make a real payment via Google Pay
     """
     settings = load_settings(config)
     if report_dir:
@@ -106,7 +109,6 @@ def run(
         run_logger.log_step("acquire_device", "started")
 
         if device_id:
-            # Acquire a specific device by ID — verify it is available first
             available = farm_client.list_devices()
             if not any(d.id == device_id for d in available):
                 raise RuntimeError(
@@ -127,7 +129,7 @@ def run(
         )
         click.echo(f"Reserved device: {reserved.device_info.model} (id={reserved.device_info.id})")
 
-        # 2. Start Appium session and run scenario
+        # 2. Start Appium session
         executor = AppiumExecutor(
             reserved,
             retry_count=settings.retry_count,
@@ -151,6 +153,7 @@ def run(
                     step=step,
                     dry_run=dry_run,
                     device_id=reserved.device_info.id,
+                    recovery=recovery,
                 )
                 success = True
             finally:
@@ -164,7 +167,7 @@ def run(
                 img = executor.screenshot()
                 run_logger.save_screenshot(img, label="fatal_error")
             except Exception as screenshot_exc:
-                logger.warning("Failed to save error screenshot", error=str(screenshot_exc))
+                logger.warning("Failed to save error screenshot %s", str(screenshot_exc))
     finally:
         if reserved and farm_client:
             click.echo("Releasing device...")
@@ -185,65 +188,92 @@ def _run_scenario(
     step: Optional[str],
     dry_run: bool,
     device_id: str,
+    recovery: "RecoveryManager",
 ) -> None:
     """
-    Execute the automation scenario steps in order.
+    Build the ScenarioRunner and execute the scenario steps.
 
-    Each step is a separate module imported on demand so that individual
-    steps can be run and tested in isolation via --step flag.
+    If --step is provided, only that step is executed (for single-step debugging).
+    Otherwise all four steps run in order.
     """
-    # Import steps lazily to avoid circular imports and keep startup fast
     from .scenarios.steps import (
         google_account,
         install_mlbb,
         mlbb_onboarding,
         payment,
     )
+    from .scenarios.engine import ScenarioRunner, Step
 
-    steps_registry = {
-        "google_account": lambda: google_account.run(
-            executor=executor,
-            run_logger=run_logger,
-            email=settings.google_email,
-            password=settings.google_password,
-            device_id=device_id,
+    # Build step closures — each binds its own arguments
+    all_steps = [
+        Step(
+            name="google_account",
+            fn=lambda: google_account.run(
+                executor=executor,
+                run_logger=run_logger,
+                email=settings.google_email,
+                password=settings.google_password,
+                device_id=device_id,
+            ),
+            max_retries=settings.retry_count,
         ),
-        "install_mlbb": lambda: install_mlbb.run(
-            executor=executor,
-            run_logger=run_logger,
-            device_id=device_id,
+        Step(
+            name="install_mlbb",
+            fn=lambda: install_mlbb.run(
+                executor=executor,
+                run_logger=run_logger,
+                device_id=device_id,
+            ),
+            max_retries=settings.retry_count,
         ),
-        "mlbb_onboarding": lambda: mlbb_onboarding.run(
-            executor=executor,
-            run_logger=run_logger,
-            device_id=device_id,
+        Step(
+            name="mlbb_onboarding",
+            fn=lambda: mlbb_onboarding.run(
+                executor=executor,
+                run_logger=run_logger,
+                device_id=device_id,
+            ),
+            max_retries=settings.retry_count,
         ),
-        "payment": lambda: payment.run(
-            executor=executor,
-            run_logger=run_logger,
-            device_id=device_id,
-            dry_run=dry_run,
+        Step(
+            name="payment",
+            fn=lambda: payment.run(
+                executor=executor,
+                run_logger=run_logger,
+                device_id=device_id,
+                dry_run=dry_run,
+            ),
+            max_retries=settings.retry_count,
+            fatal=True,  # Payment step failure is always fatal
         ),
-    }
+    ]
 
-    # Warn explicitly: all scenario steps are stubs until Task #3 is complete.
-    # The run will succeed (status=stub_ok) but no real device actions execute.
-    click.echo(
-        "\n[WARNING] Scenario steps are stubs — no real device interactions will occur.\n"
-        "          Full implementation is tracked in Task #3.\n"
-    )
+    runner = ScenarioRunner(executor=executor, run_logger=run_logger, recovery=recovery)
 
     if step:
-        # Run only the specified step
-        if step not in steps_registry:
-            raise ValueError(f"Unknown step: {step!r}. Valid steps: {list(steps_registry)}")
-        click.echo(f"Running single step: {step} (stub)")
-        steps_registry[step]()
+        # Single-step mode — find the requested step
+        matching = [s for s in all_steps if s.name == step]
+        if not matching:
+            valid = [s.name for s in all_steps]
+            raise ValueError(f"Unknown step: {step!r}. Valid steps: {valid}")
+        click.echo(f"Running single step: {step}")
+        runner.add_step(matching[0])
     else:
-        # Run all steps in order
-        for step_name, step_fn in steps_registry.items():
-            click.echo(f"  → {step_name} (stub)")
-            step_fn()
+        # Full run — add all steps in order
+        click.echo("Running all scenario steps:")
+        for s in all_steps:
+            click.echo(f"  → {s.name}")
+            runner.add_step(s)
+
+    results = runner.run()
+
+    # Print results summary
+    click.echo("\nStep results:")
+    for result in results:
+        icon = "✓" if result.status == "ok" else ("–" if result.status == "skipped" else "✗")
+        click.echo(f"  {icon} {result.name}: {result.status} (attempts: {result.attempts})")
+        if result.error:
+            click.echo(f"       error: {result.error}")
 
 
 if __name__ == "__main__":
