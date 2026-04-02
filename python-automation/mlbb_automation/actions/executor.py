@@ -323,9 +323,17 @@ class AppiumExecutor:
         if clear_first:
             active = self._retry(lambda: self.driver.switch_to.active_element)
             self._retry(lambda: active.clear())
-        self._retry(lambda: self.driver.execute_script(
-            "mobile: type", {"text": text}
-        ))
+
+        def _do_type() -> None:
+            try:
+                self.driver.execute_script("mobile: type", {"text": text})
+            except Exception:
+                # Fallback: send_keys on the active element — works across all
+                # Appium server versions when mobile: type is unavailable.
+                active = self.driver.switch_to.active_element
+                active.send_keys(text)
+
+        self._retry(_do_type)
         self._record_action("type_text", text_length=len(text), clear_first=clear_first)
 
     def type_into_element(self, element: WebElement, text: str, clear_first: bool = True) -> None:

@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     session_timeout_minutes: int = Field(default=60, ge=5)
 
     # --- Logging & artifacts ---
-    log_dir: Path = Field(default=Path("./run_artifacts"))
+    log_dir: Path = Field(default=Path("./artifacts"))
     log_level: str = Field(default="INFO")
     save_screenshots_on_error: bool = True
     save_all_screenshots: bool = False

@@ -5,7 +5,7 @@ Usage:
     logger = get_logger("module_name")
     logger.info("action_complete", action="tap", x=100, y=200, result="ok")
 
-    run_logger = RunLogger(run_id="run_20240101_120000", log_dir=Path("./run_artifacts"))
+    run_logger = RunLogger(run_id="run_20240101_120000", log_dir=Path("./artifacts"))
     run_logger.log_step("google_account", status="started")
     run_logger.save_screenshot(image, label="after_login")
     run_logger.finalize(success=True)
