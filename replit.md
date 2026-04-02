@@ -94,3 +94,48 @@ Generated React Query hooks and fetch client from the OpenAPI spec (e.g. `useHea
 ### `scripts` (`@workspace/scripts`)
 
 Utility scripts package. Each script is a `.ts` file in `src/` with a corresponding npm script in `package.json`. Run scripts via `pnpm --filter @workspace/scripts run <script>`. Scripts can import any workspace package (e.g., `@workspace/db`) by adding it as a dependency in `scripts/package.json`.
+
+## Python Automation Package
+
+### `python-automation/` — MLBB Device Farm Automation
+
+Standalone Python package (not part of the pnpm monorepo). Automates Mobile Legends: Bang Bang on Android devices via Selectel Mobile Farm.
+
+**Install:** `cd python-automation && pip install -e .`
+
+**Run:** `mlbb-automation run --config config.yaml`
+
+**Stack:**
+- Python 3.10+
+- Appium-Python-Client 5.x (UiAutomator2 for Android)
+- Pydantic v2 (configuration)
+- structlog (structured JSON logging)
+- Pillow (screenshot handling)
+
+**Package structure:**
+```
+python-automation/mlbb_automation/
+├── config/settings.py          # Pydantic v2 config (YAML + MLBB_* env vars)
+├── device_farm/
+│   ├── base.py                 # Abstract DeviceFarmClient interface
+│   └── selectel_client.py      # Selectel Mobile Farm REST API client
+├── actions/executor.py         # Appium WebDriver action wrapper (tap, swipe, type, etc.)
+├── logging/logger.py           # Structlog JSON logger + RunLogger (artifacts, screenshots)
+├── recovery/manager.py         # Freeze detection + auto-recovery watchdog
+└── scenarios/steps/            # Scenario steps (full impl in Task #2 & #3)
+    ├── google_account.py       # Add Google account to device
+    ├── install_mlbb.py         # Install MLBB from Google Play
+    ├── mlbb_onboarding.py      # Skip onboarding, reach main menu
+    └── payment.py              # Shop → Diamonds → Google Pay payment
+```
+
+**Config file:** `python-automation/config.example.yaml` — copy to `config.yaml` and fill in credentials.
+
+**Artifacts per run:** `run_artifacts/<run_id>/` — `events.jsonl`, `report.json`, `screenshots/`
+
+**Key design decisions:**
+- Selectel farm uses Appium (WebDriver) protocol, not raw ADB
+- UiAutomator2Options used for Appium 5.x compatibility
+- Abstract `DeviceFarmClient` base allows swapping providers
+- All actions retry 3x with exponential backoff on StaleElement/Timeout
+- RecoveryManager detects screen freezes via image hash comparison

@@ -1,0 +1,27 @@
+# Selectel Mobile Farm configuration
+selectel_api_key: "your-selectel-api-key-here"
+selectel_api_url: "https://mf.selectel.ru/api/v1"
+
+# Google account credentials (no 2FA required)
+google_email: "your-email@gmail.com"
+google_password: "your-password"
+
+# Device filter preferences (optional — leave null for any available device)
+device_filter:
+  platform_version: "11"   # Android version (e.g. "11", "12", "13")
+  device_model: null        # e.g. "Samsung Galaxy S21", or null for any
+
+# Appium settings
+appium_url: null  # Override if farm provides custom Appium URL; null = auto from farm API
+
+# Retry and timeout settings
+retry_count: 3
+retry_delay_seconds: 2.0
+action_timeout_seconds: 30
+session_timeout_minutes: 60
+
+# Logging and artifact storage
+log_dir: "./run_artifacts"
+log_level: "INFO"           # DEBUG, INFO, WARNING, ERROR
+save_screenshots_on_error: true
+save_all_screenshots: false  # true = screenshot after every action (verbose)
