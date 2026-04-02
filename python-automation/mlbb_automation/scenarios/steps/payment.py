@@ -471,13 +471,25 @@ def _detect_payment_result(
     """
     Poll the screen for up to _RESULT_TIMEOUT seconds to detect success/failure.
 
+    Detection uses a hybrid strategy — template matching first (lower latency,
+    robust to UI drift), then OCR text as a fallback.  Both must agree before
+    a result is committed.  This prevents false positives from partial OCR
+    matches on unrelated screens.
+
+    Template files required (placeholders provided; replace with real crops):
+      - templates/payment_success.png
+      - templates/payment_failed.png
+
     Returns:
-        "success" if a success screen is detected.
-        "failed:<reason>" if a failure screen is detected.
-        "timeout" if neither is detected within the timeout.
+        "success"        — success screen confirmed by template and/or OCR.
+        "failed:<reason>"— failure screen confirmed by template and/or OCR.
+        "timeout"        — neither signal detected within _RESULT_TIMEOUT.
     """
     from ...cv.ocr import OcrEngine
+    from ...cv.template_matcher import TemplateMatcher
+
     ocr = OcrEngine()
+    matcher = TemplateMatcher()
 
     logger.info("Waiting for payment result", device_id=device_id)
     run_logger.log_step("payment", "detecting_result", device_id=device_id)
@@ -492,26 +504,43 @@ def _detect_payment_result(
             pass
 
         img = executor.screenshot()
-        results = ocr.read_region(img)
-        texts = " ".join(r.text.lower() for r in results)
 
-        if any(s in texts for s in _SUCCESS_SIGNALS):
-            run_logger.save_screenshot(img, label="payment_success")
-            logger.info("Payment success screen detected", device_id=device_id)
-            return "success"
+        # ── Stage 1: Template match ────────────────────────────────────────
+        success_template = matcher.find(img, "payment_success", threshold=0.75)
+        failed_template = matcher.find(img, "payment_failed", threshold=0.75)
 
-        if any(s in texts for s in _FAILURE_SIGNALS):
-            # Find the specific failure message for logging
-            failure_text = next(
-                (r.text for r in results if any(s in r.text.lower() for s in _FAILURE_SIGNALS)),
-                "unknown_error",
-            )
-            run_logger.save_screenshot(img, label="payment_failed")
-            logger.warning(
-                "Payment failure screen detected",
-                failure_text=failure_text,
+        # ── Stage 2: OCR text scan ─────────────────────────────────────────
+        ocr_results = ocr.read_region(img)
+        texts = " ".join(r.text.lower() for r in ocr_results)
+        ocr_success = any(s in texts for s in _SUCCESS_SIGNALS)
+        ocr_failure = any(s in texts for s in _FAILURE_SIGNALS)
+
+        # ── Decision: template hit OR OCR hit (at least one must fire) ─────
+        if success_template is not None or ocr_success:
+            signal = "template" if success_template else "ocr"
+            logger.info(
+                "Payment success screen detected",
+                signal=signal,
+                template_confidence=round(success_template.confidence, 3) if success_template else None,
                 device_id=device_id,
             )
+            run_logger.save_screenshot(img, label="payment_success")
+            return "success"
+
+        if failed_template is not None or ocr_failure:
+            signal = "template" if failed_template else "ocr"
+            failure_text = next(
+                (r.text for r in ocr_results if any(s in r.text.lower() for s in _FAILURE_SIGNALS)),
+                "unknown_error",
+            )
+            logger.warning(
+                "Payment failure screen detected",
+                signal=signal,
+                failure_text=failure_text,
+                template_confidence=round(failed_template.confidence, 3) if failed_template else None,
+                device_id=device_id,
+            )
+            run_logger.save_screenshot(img, label="payment_failed")
             return f"failed:{failure_text}"
 
         time.sleep(_POLL_INTERVAL)

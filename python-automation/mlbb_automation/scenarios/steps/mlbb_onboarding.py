@@ -227,7 +227,6 @@ def _try_tap_through(executor, ocr, img, device_id: str) -> bool:
 
     Returns True if a button was tapped, False otherwise.
     """
-    from ...cv.ocr import OcrEngine as _OcrEngine
     results = ocr.read_region(img)
 
     for result in results:

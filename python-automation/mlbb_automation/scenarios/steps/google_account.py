@@ -358,9 +358,9 @@ def _verify_account_added(
         logger.info("Account verification passed", device_id=device_id)
         return
 
-    # Try navigating to the accounts list to confirm
+    # Try navigating to the accounts list for a second check
     logger.warning(
-        "Account not immediately visible — checking accounts list",
+        "Account not immediately visible — rechecking accounts list",
         device_id=device_id,
     )
     try:
@@ -379,8 +379,8 @@ def _verify_account_added(
     except Exception as exc:
         logger.warning("Account verification settings check failed", error=str(exc))
 
-    # Non-fatal: log warning but don't abort — the account may still be usable
-    logger.warning(
-        "Could not confirm Google account in settings — proceeding anyway",
-        device_id=device_id,
+    # Both verification attempts failed — raise to let ScenarioRunner retry
+    raise StepError(
+        f"Google account '{email}' could not be confirmed in device Settings after login. "
+        "Check that credentials are correct and the account has no unexpected security prompts."
     )

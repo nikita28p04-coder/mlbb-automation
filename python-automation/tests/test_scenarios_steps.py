@@ -302,6 +302,7 @@ class TestPaymentStep:
         success_ocr = _ocr("Purchase Successful")
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[success_ocr]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
              patch("mlbb_automation.scenarios.steps.payment._open_shop"), \
              patch("mlbb_automation.scenarios.steps.payment._open_diamonds_section"), \
              patch("mlbb_automation.scenarios.steps.payment._select_smallest_package"), \
@@ -316,6 +317,7 @@ class TestPaymentStep:
         fail_ocr = _ocr("Payment Failed")
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[fail_ocr]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
              patch("mlbb_automation.scenarios.steps.payment._open_shop"), \
              patch("mlbb_automation.scenarios.steps.payment._open_diamonds_section"), \
              patch("mlbb_automation.scenarios.steps.payment._select_smallest_package"), \
@@ -362,6 +364,7 @@ class TestPaymentStep:
             return ocr_sequences[idx] if idx < len(ocr_sequences) else [success_ocr]
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", side_effect=fake_read), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
              patch("mlbb_automation.scenarios.steps.payment._open_shop"), \
              patch("mlbb_automation.scenarios.steps.payment._open_diamonds_section"), \
              patch("mlbb_automation.scenarios.steps.payment._select_smallest_package"), \
@@ -377,14 +380,38 @@ class TestPaymentStep:
 # ===========================================================================
 
 class TestDetectPaymentResult:
-    """Unit tests for the _detect_payment_result helper."""
+    """Unit tests for the _detect_payment_result helper (hybrid template+OCR)."""
 
-    def test_returns_success_on_success_text(self, tmp_path):
+    def test_returns_success_on_ocr_text(self, tmp_path):
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
-                   return_value=[_ocr("Purchase Successful")]):
+                   return_value=[_ocr("Purchase Successful")]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None):
+            from mlbb_automation.scenarios.steps.payment import _detect_payment_result
+            result = _detect_payment_result(exe, run_logger, "d1")
+
+        assert result == "success"
+
+    def test_returns_success_on_template_match(self, tmp_path):
+        """Template hit alone (no OCR match) should be sufficient for success."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        from mlbb_automation.cv.template_matcher import MatchResult
+
+        success_match = MatchResult(
+            template_name="payment_success",
+            cx=100, cy=100, confidence=0.9, scale=1.0,
+            bbox=(80, 80, 120, 120),
+        )
+
+        def fake_find(img, name, threshold=0.8):
+            return success_match if name == "payment_success" else None
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("loading")]),  \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", side_effect=fake_find):
             from mlbb_automation.scenarios.steps.payment import _detect_payment_result
             result = _detect_payment_result(exe, run_logger, "d1")
 
@@ -395,7 +422,31 @@ class TestDetectPaymentResult:
         run_logger = _make_run_logger(tmp_path)
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
-                   return_value=[_ocr("Transaction declined")]):
+                   return_value=[_ocr("Transaction declined")]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None):
+            from mlbb_automation.scenarios.steps.payment import _detect_payment_result
+            result = _detect_payment_result(exe, run_logger, "d1")
+
+        assert result.startswith("failed:")
+
+    def test_returns_failed_on_template_match(self, tmp_path):
+        """Failed template match alone should produce a failed result."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        from mlbb_automation.cv.template_matcher import MatchResult
+
+        fail_match = MatchResult(
+            template_name="payment_failed",
+            cx=100, cy=100, confidence=0.85, scale=1.0,
+            bbox=(80, 80, 120, 120),
+        )
+
+        def fake_find(img, name, threshold=0.8):
+            return fail_match if name == "payment_failed" else None
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   return_value=[_ocr("loading")]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", side_effect=fake_find):
             from mlbb_automation.scenarios.steps.payment import _detect_payment_result
             result = _detect_payment_result(exe, run_logger, "d1")
 
@@ -407,8 +458,48 @@ class TestDetectPaymentResult:
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
                    return_value=[_ocr("loading...")]), \
+             patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
              patch("mlbb_automation.scenarios.steps.payment._RESULT_TIMEOUT", 0):
             from mlbb_automation.scenarios.steps.payment import _detect_payment_result
             result = _detect_payment_result(exe, run_logger, "d1")
 
         assert result == "timeout"
+
+
+class TestGoogleAccountVerification:
+    """Enforce that account verification failure raises StepError."""
+
+    def test_verification_raises_step_error_when_account_not_found(self, tmp_path):
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+
+        # OCR never returns the email or success signals
+        unknown_ocr = _ocr("some unrelated text")
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[unknown_ocr]):
+            from mlbb_automation.scenarios.steps.google_account import (
+                StepError,
+                _verify_account_added,
+            )
+            with pytest.raises(StepError, match="could not be confirmed"):
+                _verify_account_added(exe, run_logger, "test@gmail.com", "d1")
+
+    def test_verification_passes_when_email_in_ocr(self, tmp_path):
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+
+        email_ocr = _ocr("test@gmail.com")
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[email_ocr]):
+            from mlbb_automation.scenarios.steps.google_account import _verify_account_added
+            _verify_account_added(exe, run_logger, "test@gmail.com", "d1")
+
+    def test_verification_passes_on_sync_signal(self, tmp_path):
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+
+        sync_ocr = _ocr("Account added Sync")
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[sync_ocr]):
+            from mlbb_automation.scenarios.steps.google_account import _verify_account_added
+            _verify_account_added(exe, run_logger, "other@gmail.com", "d1")
