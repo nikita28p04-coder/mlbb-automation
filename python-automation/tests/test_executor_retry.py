@@ -174,8 +174,102 @@ class TestFailureScreenshot:
 
 
 # ---------------------------------------------------------------------------
-# Structured action logging via RunLogger
+# find_element — 3-stage miss strategy
 # ---------------------------------------------------------------------------
+
+class TestFindElement:
+    """
+    Tests for AppiumExecutor.find_element() 3-stage fallback.
+
+    Stage 1: TemplateMatcher.find()
+    Stage 2: OcrEngine.find_text()
+    Stage 3: AppiumExecutor.find_element_by_text() → Appium UI hierarchy
+    """
+
+    def _make_1x1_png(self) -> bytes:
+        from PIL import Image
+        img = Image.new("RGB", (1, 1), color=(255, 255, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _exe_with_screenshot(self, mock_driver):
+        mock_driver.get_screenshot_as_png.return_value = self._make_1x1_png()
+        return _make_executor(mock_driver)
+
+    def test_returns_template_coords_when_template_found(self):
+        from mlbb_automation.cv.template_matcher import MatchResult
+        driver = MagicMock()
+        exe = self._exe_with_screenshot(driver)
+        tmpl_hit = MatchResult(
+            template_name="buy_button",
+            cx=300, cy=700,
+            confidence=0.92,
+            scale=1.0,
+            bbox=(280, 685, 320, 715),
+        )
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=tmpl_hit), \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=None):
+            x, y = exe.find_element("Buy", template_name="buy_button")
+        assert (x, y) == (300, 700)
+
+    def test_falls_back_to_ocr_when_template_misses(self):
+        from mlbb_automation.cv.ocr import OcrResult
+        driver = MagicMock()
+        exe = self._exe_with_screenshot(driver)
+        ocr_hit = OcrResult(text="Buy", confidence=0.85, cx=200, cy=500, bbox=(180, 490, 220, 510))
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=ocr_hit):
+            x, y = exe.find_element("Buy", template_name="buy_button")
+        assert (x, y) == (200, 500)
+
+    def test_falls_back_to_appium_when_ocr_misses(self):
+        driver = MagicMock()
+        exe = self._exe_with_screenshot(driver)
+        mock_el = MagicMock()
+        mock_el.location = {"x": 100, "y": 400}
+        mock_el.size = {"width": 80, "height": 40}
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=None), \
+             patch.object(exe, "find_element_by_text", return_value=mock_el):
+            x, y = exe.find_element("Buy")
+        assert (x, y) == (140, 420)
+
+    def test_raises_runtimeerror_when_all_stages_fail(self, tmp_path):
+        driver = MagicMock()
+        run_logger = _make_run_logger(tmp_path)
+        driver.get_screenshot_as_png.return_value = self._make_1x1_png()
+        exe = _make_executor(driver, run_logger=run_logger)
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=None), \
+             patch.object(exe, "find_element_by_text", return_value=None):
+            with pytest.raises(RuntimeError, match="find_element failed"):
+                exe.find_element("NonExistent", template_name="missing_tmpl", retries=1)
+
+    def test_diagnostic_screenshot_saved_on_failure(self, tmp_path):
+        driver = MagicMock()
+        run_logger = _make_run_logger(tmp_path)
+        driver.get_screenshot_as_png.return_value = self._make_1x1_png()
+        exe = _make_executor(driver, run_logger=run_logger)
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find", return_value=None), \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=None), \
+             patch.object(exe, "find_element_by_text", return_value=None):
+            with pytest.raises(RuntimeError):
+                exe.find_element("MissingBtn", retries=1)
+        screenshots = list((tmp_path / "test-run" / "screenshots").glob("*.png"))
+        assert any("find_element_failed" in s.name for s in screenshots)
+
+    def test_skips_template_stage_when_no_template_name(self):
+        from mlbb_automation.cv.ocr import OcrResult
+        driver = MagicMock()
+        exe = self._exe_with_screenshot(driver)
+        ocr_hit = OcrResult(text="Shop", confidence=0.9, cx=50, cy=100, bbox=(40, 90, 60, 110))
+        with patch("mlbb_automation.cv.template_matcher.TemplateMatcher.find") as mock_tmpl, \
+             patch("mlbb_automation.cv.ocr.OcrEngine.find_text", return_value=ocr_hit):
+            x, y = exe.find_element("Shop")
+        mock_tmpl.assert_not_called()
+        assert (x, y) == (50, 100)
+
 
 class TestActionLogging:
     def test_tap_logged_to_run_logger(self, tmp_path):

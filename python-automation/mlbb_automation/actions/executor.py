@@ -431,6 +431,136 @@ class AppiumExecutor:
             return True
         return False
 
+    def find_element(
+        self,
+        text: str,
+        template_name: Optional[str] = None,
+        retries: int = 2,
+        retry_delay: float = 1.5,
+    ) -> tuple[int, int]:
+        """
+        Locate a UI element using a 3-stage miss strategy:
+
+        Stage 1 — Template match:
+            If ``template_name`` is provided, search the current screenshot
+            for the template image.  Returns the match centre if found.
+
+        Stage 2 — OCR text search:
+            Run OCR on the current screenshot and look for ``text``.
+            Returns the text bounding-box centre if found.
+
+        Stage 3 — Appium UI hierarchy search:
+            Query the Appium element tree for a node whose ``@text`` or
+            ``@content-desc`` contains ``text``.  Returns the element
+            centre if found.
+
+        Each failed stage triggers a 1.5 s pause before the next stage.
+        If all three stages miss on the final retry, a diagnostic screenshot
+        is saved (when a RunLogger is attached) and a ``RuntimeError`` is
+        raised with details from all three stages.
+
+        Args:
+            text:          Human-readable label to find via OCR and Appium.
+            template_name: Optional template file stem (without extension).
+            retries:       Number of full 3-stage attempts before giving up.
+            retry_delay:   Seconds between retries.
+
+        Returns:
+            (x, y) pixel coordinates of the found element centre.
+
+        Raises:
+            RuntimeError: If all stages fail on all retries.
+        """
+        from ..cv.ocr import OcrEngine
+        from ..cv.template_matcher import TemplateMatcher
+
+        ocr_engine = OcrEngine()
+        matcher = TemplateMatcher()
+
+        last_errors: list[str] = []
+
+        for attempt in range(1, retries + 1):
+            img = self.screenshot()
+            stage_errors: list[str] = []
+
+            # Stage 1: template match
+            if template_name is not None:
+                try:
+                    result = matcher.find(img, template_name)
+                    if result is not None:
+                        self._record_action(
+                            "find_element",
+                            text=text,
+                            stage="template",
+                            attempt=attempt,
+                        )
+                        return result.cx, result.cy
+                    stage_errors.append(
+                        f"stage1/template '{template_name}': no match"
+                    )
+                except Exception as exc:
+                    stage_errors.append(f"stage1/template error: {exc}")
+
+            # Stage 2: OCR text search
+            try:
+                ocr_result = ocr_engine.find_text(img, text, min_confidence=0.5)
+                if ocr_result is not None:
+                    self._record_action(
+                        "find_element",
+                        text=text,
+                        stage="ocr",
+                        attempt=attempt,
+                    )
+                    return ocr_result.cx, ocr_result.cy
+                stage_errors.append(f"stage2/ocr '{text}': no match")
+            except Exception as exc:
+                stage_errors.append(f"stage2/ocr error: {exc}")
+
+            # Stage 3: Appium UI hierarchy
+            try:
+                el = self.find_element_by_text(text, timeout=5)
+                if el is not None:
+                    loc = el.location
+                    sz = el.size
+                    cx = loc["x"] + sz["width"] // 2
+                    cy = loc["y"] + sz["height"] // 2
+                    self._record_action(
+                        "find_element",
+                        text=text,
+                        stage="appium",
+                        attempt=attempt,
+                    )
+                    return cx, cy
+                stage_errors.append(f"stage3/appium '{text}': not found")
+            except Exception as exc:
+                stage_errors.append(f"stage3/appium error: {exc}")
+
+            last_errors = stage_errors
+            if attempt < retries:
+                logger.warning(
+                    "find_element retry %d/%d for '%s': %s",
+                    attempt,
+                    retries,
+                    text,
+                    "; ".join(stage_errors),
+                )
+                time.sleep(retry_delay)
+
+        # All retries exhausted — save diagnostic screenshot
+        try:
+            diag_img = self.screenshot()
+            if self._run_logger is not None:
+                self._run_logger.save_screenshot(
+                    diag_img, label=f"find_element_failed_{text[:30]}"
+                )
+        except Exception as cap_exc:
+            logger.warning("find_element: diagnostic screenshot failed: %s", cap_exc)
+
+        raise RuntimeError(
+            f"find_element failed after {retries} attempts for text='{text}' "
+            f"template='{template_name}': {'; '.join(last_errors)}"
+        )
+
     # ------------------------------------------------------------------
     # App management
     # ------------------------------------------------------------------

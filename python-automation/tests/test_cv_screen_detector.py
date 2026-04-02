@@ -55,7 +55,7 @@ def _make_detector(ocr_results=None, tmpl_results=None) -> ScreenDetector:
 class TestScreenStateEnum:
     def test_all_states_defined(self):
         expected = {
-            "GOOGLE_LOGIN", "GOOGLE_2FA", "GOOGLE_ACCOUNT_ADDED",
+            "GOOGLE_LOGIN", "GOOGLE_2FA",
             "MLBB_LOADING", "MLBB_MAIN_MENU",
             "MLBB_SHOP", "MLBB_SHOP_DIAMONDS",
             "MLBB_PAYMENT", "GOOGLE_PAY_SHEET",

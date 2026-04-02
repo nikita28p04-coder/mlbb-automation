@@ -33,7 +33,6 @@ class ScreenState(Enum):
 
     GOOGLE_LOGIN = auto()
     GOOGLE_2FA = auto()
-    GOOGLE_ACCOUNT_ADDED = auto()
     MLBB_LOADING = auto()
     MLBB_MAIN_MENU = auto()
     MLBB_SHOP = auto()
@@ -170,11 +169,6 @@ _STATE_SPECS: List[StateSpec] = [
     ]),
     StateSpec(ScreenState.GOOGLE_2FA, min_score=1.0, signals=[
         _ocr_signal("verify it's you", confidence=0.5, required=True),
-    ]),
-
-    # --- Google account added confirmation ---
-    StateSpec(ScreenState.GOOGLE_ACCOUNT_ADDED, min_score=1.0, signals=[
-        _ocr_signal("account added", confidence=0.5, required=True),
     ]),
 
     # --- Google login ---

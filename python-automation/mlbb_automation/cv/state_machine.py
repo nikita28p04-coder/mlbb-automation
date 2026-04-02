@@ -254,15 +254,20 @@ class StateMachine:
             return action
 
         def _find_and_tap_text(text: str, fallback_xy: Tuple[int, int]) -> Callable:
-            """Try OCR text search first, fall back to coordinates."""
+            """
+            3-stage element search: template → OCR → Appium hierarchy.
+            Falls back to hard-coded coordinates if find_element raises.
+            """
             def action(e):
-                from .ocr import OcrEngine
-                ocr = OcrEngine()
-                img = e.screenshot()
-                result = ocr.find_text(img, text, min_confidence=0.5)
-                if result:
-                    e.tap(result.cx, result.cy)
-                else:
+                try:
+                    x, y = e.find_element(text, retries=2, retry_delay=1.0)
+                    e.tap(x, y)
+                except RuntimeError:
+                    logger.warning(
+                        "find_and_tap fell back to coords for '%s' at %s",
+                        text,
+                        fallback_xy,
+                    )
                     e.tap(*fallback_xy)
             action.__name__ = f"find_and_tap_{text}"
             return action
@@ -309,16 +314,6 @@ class StateMachine:
                 ScreenState.PAYMENT_SUCCESS,
                 action=_find_and_tap_text("Pay", fallback_xy=(540, 1700)),
                 label="confirm_payment",
-            ),
-            # Google login → account added (full login handled by scenario steps)
-            T(
-                ScreenState.GOOGLE_LOGIN,
-                ScreenState.GOOGLE_ACCOUNT_ADDED,
-                action=lambda e: logger.warning(
-                    "google_login_transition_manual",
-                    msg="Google login must be handled by the google_account scenario step",
-                ),
-                label="google_login_placeholder",
             ),
             # UNKNOWN → try going home and re-detect
             T(
