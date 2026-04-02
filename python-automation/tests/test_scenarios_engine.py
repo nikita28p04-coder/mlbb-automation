@@ -48,6 +48,12 @@ def _make_run_logger(tmp_path: Path):
     return RunLogger(run_id="test_run", log_dir=tmp_path)
 
 
+def _make_recovery():
+    recovery = MagicMock()
+    recovery.attempt_recovery = MagicMock()
+    return recovery
+
+
 # ---------------------------------------------------------------------------
 # Single successful step
 # ---------------------------------------------------------------------------
@@ -212,7 +218,7 @@ class TestFatalSteps:
 
         runner.add_step(
             Step("bad_fatal", fn=lambda: (_ for _ in ()).throw(RuntimeError("fatal")),
-                 max_retries=1, retry_delay=0, fatal=True)
+                 max_retries=3, retry_delay=0, fatal=True)
         )
         runner.add_step(
             Step("should_not_run", fn=lambda: second_called.append(True))
@@ -223,6 +229,54 @@ class TestFatalSteps:
 
         assert second_called == []
         assert "bad_fatal" in str(exc_info.value)
+
+    def test_fatal_step_does_not_retry(self, tmp_path):
+        """A fatal step must abort on the FIRST failure — no retry attempts."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        recovery = _make_recovery()
+        runner = ScenarioRunner(exe, run_logger, recovery)
+
+        call_count = [0]
+
+        def failing_fn():
+            call_count[0] += 1
+            raise RuntimeError("permanent failure")
+
+        runner.add_step(
+            Step("fatal_once", fn=failing_fn, max_retries=5, retry_delay=0, fatal=True)
+        )
+
+        with pytest.raises(ScenarioAborted):
+            runner.run()
+
+        # Must have been called exactly once — no retries, no recovery
+        assert call_count[0] == 1
+        recovery.attempt_recovery.assert_not_called()
+
+    def test_non_fatal_step_retries_and_recovery(self, tmp_path):
+        """A non-fatal step retries up to max_retries, then invokes recovery."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        recovery = _make_recovery()
+        runner = ScenarioRunner(exe, run_logger, recovery)
+
+        call_count = [0]
+
+        def always_fail():
+            call_count[0] += 1
+            raise RuntimeError("fail")
+
+        runner.add_step(
+            Step("non_fatal", fn=always_fail, max_retries=2, retry_delay=0, fatal=False)
+        )
+
+        with pytest.raises(ScenarioAborted):
+            runner.run()
+
+        # Should retry up to max_retries, then attempt recovery
+        assert call_count[0] >= 2
+        recovery.attempt_recovery.assert_called()
 
 
 # ---------------------------------------------------------------------------

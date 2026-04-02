@@ -472,12 +472,16 @@ class TestDetectPaymentResult:
 class TestDeviceAuthHandling:
     """Tests for _handle_device_auth, _enter_pin, _fallback_to_pin, _cancel_auth_prompt."""
 
-    def test_no_auth_prompt_returns_immediately(self, tmp_path):
-        """When no PIN/biometric prompt is visible, _handle_device_auth returns silently."""
+    def test_no_auth_prompt_returns_after_observation_window(self, tmp_path):
+        """
+        _handle_device_auth waits for _NO_AUTH_CONFIRM_FRAMES consecutive clean
+        frames before concluding that no auth is required.  This prevents the script
+        from skipping a biometric/PIN prompt that appears with a short delay.
+        """
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
 
-        # OCR returns generic text (no auth signals)
+        # OCR always returns generic text (no auth signals) — returns after 2 clean frames
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
                    return_value=[_ocr("loading")]), \
              patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
@@ -488,6 +492,36 @@ class TestDeviceAuthHandling:
 
         # No taps should have been needed
         exe.tap.assert_not_called()
+        # At least 2 screenshots taken (one per clean frame required)
+        assert exe.screenshot.call_count >= 2
+
+    def test_delayed_auth_prompt_is_not_missed(self, tmp_path, monkeypatch):
+        """
+        If the first frame is clean but the auth prompt appears on the next frame,
+        the function must detect and handle it rather than exiting early.
+        """
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        monkeypatch.setenv("PAYMENT_PIN", "9999")
+
+        # Frame 1: clean; Frame 2: PIN prompt appears; subsequent: after PIN entry
+        ocr_frames = iter([
+            [_ocr("processing")],     # first clean frame — must NOT exit here
+            [_ocr("Enter PIN")],      # delayed auth prompt appears
+        ])
+
+        exe.find_element.return_value = (100, 200)
+
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
+                   side_effect=lambda *a, **kw: next(ocr_frames, [_ocr("done")])), \
+             patch("mlbb_automation.scenarios.steps.payment.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
+            from mlbb_automation.scenarios.steps.payment import _handle_device_auth
+            _handle_device_auth(exe, run_logger, "d1")
+
+        # PIN entry must have been attempted (find_element called for digits)
+        assert exe.tap.call_count >= 4  # 4 digits tapped
 
     def test_pin_prompt_enters_pin_from_env(self, tmp_path, monkeypatch):
         """When PIN prompt is detected and PAYMENT_PIN is set, digits are entered."""

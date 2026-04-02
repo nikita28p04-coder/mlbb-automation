@@ -122,10 +122,9 @@ class ScenarioRunner:
             self._results.append(result)
 
             if result.status == "failed":
-                if step.fatal:
-                    raise ScenarioAborted(
-                        f"Fatal step '{step.name}' failed: {result.error}"
-                    )
+                # Fatal steps already raised ScenarioAborted inside _run_step.
+                # This branch handles non-fatal steps that exhausted all retries
+                # and recovery attempts.
                 raise ScenarioAborted(
                     f"Step '{step.name}' failed after {result.attempts} attempt(s): {result.error}"
                 )
@@ -190,6 +189,12 @@ class ScenarioRunner:
                     )
                 except Exception:
                     pass
+
+                # Fatal steps abort immediately — no retry or recovery
+                if step.fatal:
+                    raise ScenarioAborted(
+                        f"Fatal step '{step.name}' failed (attempt {attempt}): {last_error}"
+                    )
 
                 if attempt < step.max_retries:
                     time.sleep(step.retry_delay)

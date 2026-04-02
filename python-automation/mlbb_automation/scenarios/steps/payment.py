@@ -572,6 +572,9 @@ def _handle_device_auth(
 
     deadline = time.monotonic() + _AUTH_TIMEOUT
     biometric_dismissed = False
+    # Number of consecutive no-auth frames required before declaring "no auth"
+    _NO_AUTH_CONFIRM_FRAMES = 2
+    no_auth_frames = 0
 
     while time.monotonic() < deadline:
         img = executor.screenshot()
@@ -582,12 +585,28 @@ def _handle_device_auth(
         is_biometric = any(s in texts for s in _BIOMETRIC_SIGNALS)
 
         if not is_pin_prompt and not is_biometric:
-            # No auth prompt visible — either not required or already resolved
+            # Google Pay auth prompts can appear with a short delay after the
+            # Pay button is tapped.  Require multiple consecutive clean frames
+            # before concluding that auth is not needed, to avoid skipping an
+            # auth prompt that hasn't rendered yet.
+            no_auth_frames += 1
+            if no_auth_frames >= _NO_AUTH_CONFIRM_FRAMES:
+                logger.info(
+                    "No device auth prompt detected after %d clean frames — proceeding",
+                    _NO_AUTH_CONFIRM_FRAMES,
+                    device_id=device_id,
+                )
+                return
             logger.info(
-                "No device auth prompt detected — proceeding",
+                "No auth prompt on frame %d — waiting for confirmation",
+                no_auth_frames,
                 device_id=device_id,
             )
-            return
+            time.sleep(_POLL_INTERVAL)
+            continue
+
+        # Reset the clean-frame counter — we see an auth prompt
+        no_auth_frames = 0
 
         # ── Biometric prompt handling ──────────────────────────────────────
         if is_biometric and not biometric_dismissed:
