@@ -58,6 +58,18 @@ class DeviceFarmClient(ABC):
         """
 
     @abstractmethod
+    def acquire_device_by_id(self, device_id: str) -> "ReservedDevice":
+        """
+        Reserve a specific device by its ID.
+
+        Args:
+            device_id: The exact device ID from list_devices().
+
+        Raises:
+            RuntimeError: If the device cannot be reserved.
+        """
+
+    @abstractmethod
     def acquire_device(
         self,
         platform_version: Optional[str] = None,

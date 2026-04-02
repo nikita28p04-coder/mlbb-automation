@@ -40,7 +40,7 @@ from PIL import Image
 import io
 
 from ..device_farm.base import ReservedDevice
-from ..logging.logger import get_logger
+from ..logging.logger import RunLogger, get_logger
 
 logger = get_logger(__name__)
 
@@ -78,12 +78,14 @@ class AppiumExecutor:
         retry_delay: float = 2.0,
         action_timeout: int = 30,
         device_id: Optional[str] = None,
+        run_logger: Optional[RunLogger] = None,
     ) -> None:
         self._reserved = reserved
         self._retry_count = retry_count
         self._retry_delay = retry_delay
         self._action_timeout = action_timeout
         self._device_id = device_id or reserved.device_info.id
+        self._run_logger = run_logger
         self._driver: Optional[webdriver.Remote] = None
 
     # ------------------------------------------------------------------
@@ -134,6 +136,30 @@ class AppiumExecutor:
         return self._driver
 
     # ------------------------------------------------------------------
+    # Structured action logging
+    # ------------------------------------------------------------------
+
+    def _record_action(self, action: str, result: str = "ok", **params) -> None:
+        """
+        Emit a structured action event to both:
+          - the module-level structlog logger (debug)
+          - the RunLogger JSONL action log (if one was provided)
+
+        Args:
+            action: Short action name (e.g. "tap", "swipe", "type_text").
+            result: Outcome string — "ok" or a short error description.
+            **params: Action parameters (coordinates, text, etc.).
+        """
+        logger.debug(action, device_id=self._device_id, result=result, **params)
+        if self._run_logger is not None:
+            self._run_logger.log_action(
+                action,
+                device_id=self._device_id,
+                result=result,
+                **params,
+            )
+
+    # ------------------------------------------------------------------
     # Screenshot
     # ------------------------------------------------------------------
 
@@ -148,19 +174,19 @@ class AppiumExecutor:
 
     def tap(self, x: int, y: int, duration_ms: int = 100) -> None:
         """Tap at absolute screen coordinates."""
-        logger.debug("tap", x=x, y=y, device_id=self._device_id)
         self._retry(lambda: self.driver.execute_script(
             "mobile: clickGesture",
             {"x": x, "y": y, "duration": duration_ms},
         ))
+        self._record_action("tap", x=x, y=y, duration_ms=duration_ms)
 
     def long_press(self, x: int, y: int, duration_ms: int = 1500) -> None:
         """Long-press at absolute screen coordinates."""
-        logger.debug("long_press", x=x, y=y, duration_ms=duration_ms)
         self._retry(lambda: self.driver.execute_script(
             "mobile: longClickGesture",
             {"x": x, "y": y, "duration": duration_ms},
         ))
+        self._record_action("long_press", x=x, y=y, duration_ms=duration_ms)
 
     def swipe(
         self,
@@ -171,7 +197,6 @@ class AppiumExecutor:
         duration_ms: int = 400,
     ) -> None:
         """Swipe from (start_x, start_y) to (end_x, end_y)."""
-        logger.debug("swipe", start=(start_x, start_y), end=(end_x, end_y))
         self._retry(lambda: self.driver.execute_script(
             "mobile: swipeGesture",
             {
@@ -182,6 +207,12 @@ class AppiumExecutor:
                 "duration": duration_ms,
             },
         ))
+        self._record_action(
+            "swipe",
+            start_x=start_x, start_y=start_y,
+            end_x=end_x, end_y=end_y,
+            duration_ms=duration_ms,
+        )
 
     def swipe_up(self, distance: int = 600) -> None:
         """Convenience: swipe upward from center of screen."""
@@ -201,17 +232,18 @@ class AppiumExecutor:
 
     def press_back(self) -> None:
         """Press the Android Back button."""
-        logger.debug("press_back", device_id=self._device_id)
         self._retry(lambda: self.driver.press_keycode(4))
+        self._record_action("press_back")
 
     def press_home(self) -> None:
         """Press the Android Home button."""
-        logger.debug("press_home", device_id=self._device_id)
         self._retry(lambda: self.driver.press_keycode(3))
+        self._record_action("press_home")
 
     def press_key(self, keycode: int) -> None:
         """Press an arbitrary Android keycode."""
         self._retry(lambda: self.driver.press_keycode(keycode))
+        self._record_action("press_key", keycode=keycode)
 
     # ------------------------------------------------------------------
     # Text input
@@ -225,19 +257,20 @@ class AppiumExecutor:
             text:        Text to type.
             clear_first: If True, clear the field before typing.
         """
-        logger.debug("type_text", length=len(text))
         if clear_first:
             active = self._retry(lambda: self.driver.switch_to.active_element)
             self._retry(lambda: active.clear())
         self._retry(lambda: self.driver.execute_script(
             "mobile: type", {"text": text}
         ))
+        self._record_action("type_text", text_length=len(text), clear_first=clear_first)
 
     def type_into_element(self, element: WebElement, text: str, clear_first: bool = True) -> None:
         """Type text into a specific WebElement."""
         if clear_first:
             self._retry(lambda: element.clear())
         self._retry(lambda: element.send_keys(text))
+        self._record_action("type_into_element", text_length=len(text), clear_first=clear_first)
 
     # ------------------------------------------------------------------
     # Element finders

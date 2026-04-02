@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,13 +25,31 @@ import structlog
 from PIL import Image
 
 
-def _configure_structlog(log_level: str = "INFO") -> None:
-    """Configure structlog once at startup."""
+def _configure_structlog(log_level: str = "INFO", log_file: Optional[Path] = None) -> None:
+    """
+    Configure structlog once at startup.
+
+    Args:
+        log_level: Minimum log level string (DEBUG/INFO/WARNING/ERROR).
+        log_file:  If provided, attach a rotating file handler (10 MB × 5 backups).
+    """
     level = getattr(logging, log_level.upper(), logging.INFO)
+
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        rotating = logging.handlers.RotatingFileHandler(
+            filename=str(log_file),
+            maxBytes=10 * 1024 * 1024,  # 10 MB per file
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handlers.append(rotating)
 
     logging.basicConfig(
         format="%(message)s",
-        stream=sys.stdout,
+        handlers=handlers,
         level=level,
     )
 
@@ -54,17 +73,22 @@ def _configure_structlog(log_level: str = "INFO") -> None:
 _configured = False
 
 
-def get_logger(name: str, log_level: str = "INFO") -> structlog.stdlib.BoundLogger:
+def get_logger(
+    name: str,
+    log_level: str = "INFO",
+    log_file: Optional[Path] = None,
+) -> structlog.stdlib.BoundLogger:
     """
     Return a named structlog logger. Configures structlog on first call.
 
     Args:
         name:      Logger name, typically __name__ of the calling module.
         log_level: Minimum log level (DEBUG/INFO/WARNING/ERROR).
+        log_file:  Optional path to a rotating log file (10 MB × 5 backups).
     """
     global _configured
     if not _configured:
-        _configure_structlog(log_level)
+        _configure_structlog(log_level, log_file=log_file)
         _configured = True
     return structlog.get_logger(name)
 
@@ -72,7 +96,8 @@ def get_logger(name: str, log_level: str = "INFO") -> structlog.stdlib.BoundLogg
 class RunLogger:
     """
     Manages artifacts for a single automation run:
-      - Structured JSON event log
+      - Structured JSON event log (JSONL, one event per line)
+      - Rotating structured log file (10 MB × 5 backups via RotatingFileHandler)
       - Screenshots directory
       - Final JSON summary report
     """
@@ -85,11 +110,14 @@ class RunLogger:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
 
+        # Rotating structured log file — shared across all runs in the log_dir
+        _rotating_log = log_dir / "automation.log"
+
         self._log_path = self.run_dir / "events.jsonl"
         self._events: list[dict[str, Any]] = []
         self._screenshot_count = 0
 
-        self.logger = get_logger("run_logger", log_level).bind(run_id=run_id)
+        self.logger = get_logger("run_logger", log_level, log_file=_rotating_log).bind(run_id=run_id)
         self.logger.info("run_started", run_dir=str(self.run_dir))
 
     # ------------------------------------------------------------------

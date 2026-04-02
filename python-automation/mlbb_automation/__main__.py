@@ -105,16 +105,19 @@ def run(
         run_logger.log_step("acquire_device", "started")
         
         if device_id:
-            # Get all devices and pick the requested one
-            all_devices = farm_client.list_devices()
-            matching = [d for d in all_devices if d.id == device_id]
-            if not matching:
-                raise RuntimeError(f"Device {device_id} not available")
-        
-        reserved = farm_client.acquire_device(
-            platform_version=settings.device_filter.platform_version,
-            model=settings.device_filter.model,
-        )
+            # Acquire a specific device by ID — verify it is available first
+            available = farm_client.list_devices()
+            if not any(d.id == device_id for d in available):
+                raise RuntimeError(
+                    f"Device '{device_id}' not found or not available. "
+                    f"Available IDs: {[d.id for d in available]}"
+                )
+            reserved = farm_client.acquire_device_by_id(device_id)
+        else:
+            reserved = farm_client.acquire_device(
+                platform_version=settings.device_filter.platform_version,
+                model=settings.device_filter.device_model,
+            )
         run_logger.log_step(
             "acquire_device",
             "completed",
@@ -130,6 +133,7 @@ def run(
             retry_delay=settings.retry_delay_seconds,
             action_timeout=settings.action_timeout_seconds,
             device_id=reserved.device_info.id,
+            run_logger=run_logger,
         ) as executor:
             recovery = RecoveryManager(
                 executor=executor,

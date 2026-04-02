@@ -105,6 +105,35 @@ class SelectelFarmClient(DeviceFarmClient):
         logger.info("list_devices returned %d available devices", len(devices))
         return devices
 
+    def acquire_device_by_id(self, device_id: str) -> ReservedDevice:
+        """
+        Reserve a specific device by its ID.
+
+        Args:
+            device_id: Exact device ID as returned by list_devices().
+
+        Returns:
+            ReservedDevice ready for an Appium session.
+        """
+        # Fetch full device info to populate capabilities
+        all_devices = self.list_devices()
+        all_devices_all_statuses = self._list_all_devices()
+        target = next(
+            (d for d in all_devices_all_statuses if d.id == device_id), None
+        )
+        if target is None:
+            raise RuntimeError(f"Device '{device_id}' not found in farm")
+
+        return self._reserve_device(target)
+
+    def _list_all_devices(self) -> list[DeviceInfo]:
+        """Return all devices regardless of status (for lookup by ID)."""
+        resp = self._get(_ENDPOINT_LIST_DEVICES)
+        raw_devices: list[dict] = (
+            resp.json() if isinstance(resp.json(), list) else resp.json().get("devices", [])
+        )
+        return [self._parse_device(raw) for raw in raw_devices]
+
     def acquire_device(
         self,
         platform_version: Optional[str] = None,
@@ -119,6 +148,10 @@ class SelectelFarmClient(DeviceFarmClient):
             )
 
         target = devices[0]
+        return self._reserve_device(target)
+
+    def _reserve_device(self, target: DeviceInfo) -> ReservedDevice:
+        """Issue the rent/start API call and build a ReservedDevice."""
         logger.info("Reserving device id=%s model=%s", target.id, target.model)
 
         payload = {"deviceId": target.id}
