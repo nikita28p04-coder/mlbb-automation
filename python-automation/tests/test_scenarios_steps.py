@@ -174,7 +174,10 @@ class TestInstallMlbbStep:
             call_count[0] += 1
             return ocr_sequences[idx] if idx < len(ocr_sequences) else [open_ocr]
 
-        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", side_effect=fake_read):
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", side_effect=fake_read), \
+             patch("mlbb_automation.scenarios.steps.install_mlbb.time") as mock_time:
+            mock_time.monotonic.side_effect = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps import install_mlbb
             install_mlbb.run(executor=exe, run_logger=run_logger, device_id="d1")
 
@@ -191,7 +194,10 @@ class TestInstallMlbbStep:
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[install_ocr]), \
              patch("mlbb_automation.scenarios.steps.install_mlbb._INSTALL_TIMEOUT", 0), \
-             patch("mlbb_automation.scenarios.steps.install_mlbb._open_play_store"):
+             patch("mlbb_automation.scenarios.steps.install_mlbb._open_play_store"), \
+             patch("mlbb_automation.scenarios.steps.install_mlbb.time") as mock_time:
+            mock_time.monotonic.side_effect = [0, 1, 2, 3, 4, 5]
+            mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.install_mlbb import StepError
             from mlbb_automation.scenarios.steps import install_mlbb
             with pytest.raises(StepError, match="timed out"):
@@ -268,24 +274,16 @@ class TestPaymentStep:
             [_ocr("Purchase Successful")],  # _detect_payment_result: success
         ]
 
-    def test_dry_run_does_not_tap_buy(self, tmp_path):
+    def test_dry_run_taps_buy_but_skips_payment_confirmation(self, tmp_path):
+        """dry_run should navigate through Buy → Google Pay sheet, then stop."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
 
-        ocr_seq = [
-            [_ocr("Shop")],
-            [_ocr("Diamonds")],
-            [_ocr("0.99")],
-        ]
-        call_count = [0]
-
-        def fake_read(img, **kwargs):
-            idx = call_count[0]
-            call_count[0] += 1
-            return ocr_seq[idx] if idx < len(ocr_seq) else [_ocr("Diamonds")]
-
-        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", side_effect=fake_read), \
-             patch("mlbb_automation.scenarios.steps.payment._tap_buy") as mock_buy:
+        with patch("mlbb_automation.scenarios.steps.payment._open_shop"), \
+             patch("mlbb_automation.scenarios.steps.payment._open_diamonds_section"), \
+             patch("mlbb_automation.scenarios.steps.payment._select_smallest_package"), \
+             patch("mlbb_automation.scenarios.steps.payment._tap_buy") as mock_buy, \
+             patch("mlbb_automation.scenarios.steps.payment._handle_google_pay") as mock_pay:
             from mlbb_automation.scenarios.steps import payment
             payment.run(
                 executor=exe,
@@ -294,7 +292,10 @@ class TestPaymentStep:
                 dry_run=True,
             )
 
-        mock_buy.assert_not_called()
+        # Buy IS tapped in dry_run mode
+        mock_buy.assert_called_once()
+        # Google Pay handler IS called with dry_run=True
+        mock_pay.assert_called_once_with(exe, run_logger, "d1", dry_run=True)
 
     def test_success_detection(self, tmp_path):
         exe = _make_executor()
@@ -332,7 +333,7 @@ class TestPaymentStep:
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
 
-        # find_element raises RuntimeError (shop not found)
+        # All find_element calls fail (Shop button not found in any language)
         exe.find_element.side_effect = RuntimeError("not found")
 
         unknown_ocr = _ocr("unknown text")
@@ -342,6 +343,8 @@ class TestPaymentStep:
             from mlbb_automation.scenarios.steps import payment
             with pytest.raises(StepError, match="[Ss]hop"):
                 payment.run(executor=exe, run_logger=run_logger, device_id="d1", dry_run=False)
+            # find_element should have been tried multiple times (once per localized label)
+            assert exe.find_element.call_count >= 2
 
     def test_google_pay_webview_context_attempted(self, tmp_path):
         exe = _make_executor()
@@ -437,7 +440,7 @@ class TestDetectPaymentResult:
 
         fail_match = MatchResult(
             template_name="payment_failed",
-            cx=100, cy=100, confidence=0.85, scale=1.0,
+            cx=100, cy=100, confidence=0.92, scale=1.0,
             bbox=(80, 80, 120, 120),
         )
 
@@ -476,7 +479,9 @@ class TestGoogleAccountVerification:
         # OCR never returns the email or success signals
         unknown_ocr = _ocr("some unrelated text")
 
-        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[unknown_ocr]):
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[unknown_ocr]), \
+             patch("mlbb_automation.scenarios.steps.google_account.time") as mock_time:
+            mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.google_account import (
                 StepError,
                 _verify_account_added,
@@ -490,7 +495,10 @@ class TestGoogleAccountVerification:
 
         email_ocr = _ocr("test@gmail.com")
 
-        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[email_ocr]):
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[email_ocr]), \
+             patch("mlbb_automation.scenarios.steps.google_account.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.google_account import _verify_account_added
             _verify_account_added(exe, run_logger, "test@gmail.com", "d1")
 
@@ -500,6 +508,9 @@ class TestGoogleAccountVerification:
 
         sync_ocr = _ocr("Account added Sync")
 
-        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[sync_ocr]):
+        with patch("mlbb_automation.cv.ocr.OcrEngine.read_region", return_value=[sync_ocr]), \
+             patch("mlbb_automation.scenarios.steps.google_account.time") as mock_time:
+            mock_time.monotonic.return_value = 0
+            mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.google_account import _verify_account_added
             _verify_account_added(exe, run_logger, "other@gmail.com", "d1")

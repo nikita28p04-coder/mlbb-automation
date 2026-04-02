@@ -21,11 +21,15 @@ logger = get_logger(__name__)
 MLBB_PACKAGE = "com.mobile.legends"
 PLAY_STORE_PACKAGE = "com.android.vending"
 
-# UI text signals
-_INSTALL_BUTTON = ("install", "установить")
+# UI text labels — tried in order during find_element calls (EN then RU)
+_INSTALL_LABELS = ("Install", "Установить")
+_OPEN_LABELS = ("Open", "Открыть")
+
+# OCR signals for state detection (lowercase)
+_INSTALL_SIGNALS = ("install", "установить")
 _INSTALLING_SIGNALS = ("installing", "downloading", "загрузка", "установка", "pending")
-_OPEN_BUTTON = ("open", "открыть")
-_ALREADY_INSTALLED_SIGNALS = ("open", "uninstall", "update")
+_OPEN_SIGNALS = ("open", "открыть")
+_ALREADY_INSTALLED_SIGNALS = ("open", "uninstall", "update", "открыть", "удалить")
 
 # Timeouts
 _INSTALL_TIMEOUT = 600  # 10 minutes — MLBB is a large download
@@ -110,19 +114,29 @@ def _tap_install_and_wait(
     results = ocr.read_region(img)
     texts = " ".join(r.text.lower() for r in results)
 
-    if any(s in texts for s in _ALREADY_INSTALLED_SIGNALS) and "install" not in texts:
+    already_installed = (
+        any(s in texts for s in _ALREADY_INSTALLED_SIGNALS)
+        and not any(s in texts for s in _INSTALL_SIGNALS)
+    )
+    if already_installed:
         logger.info("Play Store shows Open/Uninstall — app already installed", device_id=device_id)
         run_logger.log_step("install_mlbb", "play_store_already_installed", device_id=device_id)
         return
 
-    # Tap Install
+    # Tap Install — try each localized label in turn
     logger.info("Tapping Install", device_id=device_id)
     run_logger.log_step("install_mlbb", "tapping_install", device_id=device_id)
-    try:
-        x, y = executor.find_element("Install", template_name=None, retries=3)
-        executor.tap(x, y)
-    except RuntimeError as exc:
-        raise StepError(f"Could not find Install button on Play Store: {exc}") from exc
+    installed = False
+    for label in _INSTALL_LABELS:
+        try:
+            x, y = executor.find_element(label, template_name=None, retries=2)
+            executor.tap(x, y)
+            installed = True
+            break
+        except RuntimeError:
+            continue
+    if not installed:
+        raise StepError("Could not find Install button on Play Store in any supported language")
 
     time.sleep(2)
     img = executor.screenshot()
@@ -139,7 +153,7 @@ def _tap_install_and_wait(
         texts = " ".join(r.text.lower() for r in results)
 
         # "Open" button means installation completed
-        if any(btn in texts for btn in _OPEN_BUTTON):
+        if any(btn in texts for btn in _OPEN_SIGNALS):
             logger.info("Installation completed — Open button visible", device_id=device_id)
             run_logger.save_screenshot(img, label="install_complete")
             run_logger.log_step("install_mlbb", "install_complete", device_id=device_id)
@@ -169,15 +183,16 @@ def _launch_mlbb(
     """Tap 'Open' on Play Store or launch MLBB by package name."""
     logger.info("Launching MLBB", device_id=device_id)
 
-    # First try tapping "Open" if it's visible on Play Store
-    try:
-        x, y = executor.find_element("Open", retries=2)
-        executor.tap(x, y)
-        logger.info("Tapped Open on Play Store", device_id=device_id)
-        time.sleep(3)
-        return
-    except RuntimeError:
-        pass
+    # First try tapping "Open" in all supported languages if visible on Play Store
+    for label in _OPEN_LABELS:
+        try:
+            x, y = executor.find_element(label, retries=2)
+            executor.tap(x, y)
+            logger.info("Tapped Open on Play Store", label=label, device_id=device_id)
+            time.sleep(3)
+            return
+        except RuntimeError:
+            continue
 
     # Fall back to direct package launch
     logger.info("Launching MLBB by package name", device_id=device_id)

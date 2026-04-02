@@ -11,8 +11,18 @@ Flow:
   7. Detect result: "Purchase Successful" or payment error
   8. Save timestamped screenshot and log result
 
-dry_run mode: navigates all the way to the Buy button but does NOT tap it,
-then exits cleanly. This allows UI verification without spending money.
+dry_run mode: navigates all the way through Buy → Google Pay sheet but stops
+before the final payment confirmation tap.  This verifies the full UI flow
+including Google Pay sheet rendering without spending money.
+
+Payment result detection uses a two-stage hybrid strategy:
+  1. Template match against templates/payment_success.png / payment_failed.png
+     (threshold=0.85 required for template-only signal)
+  2. OCR text match against payment-specific phrases
+  A result is committed only when:
+    - Template AND OCR both confirm the same outcome, OR
+    - Template confidence >= _TEMPLATE_STRONG_THRESHOLD (0.90) alone, OR
+    - OCR matches payment-specific (not generic) phrases
 
 Context-switching notes:
   - Google Pay sometimes renders in NATIVE_APP, sometimes in WEBVIEW
@@ -34,28 +44,37 @@ logger = get_logger(__name__)
 _SHOP_SIGNALS = ("shop", "магазин")
 _DIAMONDS_SIGNALS = ("diamonds", "top up", "topup", "recharge", "алмазы", "пополнить")
 _BUY_SIGNALS = ("buy", "purchase", "купить", "приобрести")
-_GOOGLE_PAY_SIGNALS = ("google pay", "pay with google", "google pay button", "pay")
+_GOOGLE_PAY_SIGNALS = ("google pay", "pay with google", "google pay button")
+
+# Payment-specific OCR success phrases (must contain payment context words).
+# Generic words like "success" are intentionally excluded to avoid false positives
+# on unrelated UI text (e.g. achievement banners, login success messages).
 _SUCCESS_SIGNALS = (
     "purchase successful",
     "payment successful",
-    "success",
-    "thank you",
     "order confirmed",
     "покупка выполнена",
     "оплата прошла",
-    "успешно",
+    "оплата успешна",
 )
+
+# Payment-specific OCR failure phrases.  Generic words like "error", "failed"
+# are excluded because MLBB shows them in non-payment contexts (connectivity
+# errors, loading failures) which would cause false-positive payment failure detection.
 _FAILURE_SIGNALS = (
     "payment failed",
+    "payment declined",
     "transaction declined",
-    "error",
-    "declined",
-    "failed",
-    "try again",
-    "ошибка",
-    "отклонено",
-    "не удалось",
+    "transaction failed",
+    "purchase failed",
+    "оплата отклонена",
+    "транзакция отклонена",
+    "не удалось оплатить",
 )
+
+# Template confidence thresholds for payment result detection
+_TEMPLATE_MATCH_THRESHOLD = 0.85   # minimum to count as a template signal
+_TEMPLATE_STRONG_THRESHOLD = 0.90  # template alone (no OCR required) if >= this
 
 # Smallest-package heuristics — these text patterns usually appear near cheap packs
 _SMALL_PACK_SIGNALS = (
@@ -110,18 +129,16 @@ def run(
     # Step 3: Select smallest package
     _select_smallest_package(executor, run_logger, device_id)
 
-    # Step 4: Tap "Buy"
-    if dry_run:
-        img = executor.screenshot()
-        run_logger.save_screenshot(img, label="dry_run_buy_screen")
-        logger.info("DRY RUN — skipping final Buy tap", device_id=device_id)
-        run_logger.log_step("payment", "dry_run_ok", device_id=device_id)
-        return
-
+    # Step 4: Tap "Buy" — this navigates into the Google Pay sheet
     _tap_buy(executor, run_logger, device_id)
 
     # Step 5: Handle Google Pay sheet (with context switching)
-    _handle_google_pay(executor, run_logger, device_id)
+    # dry_run stops here — after reaching the sheet — without confirming payment
+    _handle_google_pay(executor, run_logger, device_id, dry_run=dry_run)
+
+    if dry_run:
+        run_logger.log_step("payment", "dry_run_ok", device_id=device_id)
+        return
 
     # Step 6: Detect result
     result = _detect_payment_result(executor, run_logger, device_id)
@@ -154,14 +171,20 @@ def _open_shop(
     img = executor.screenshot()
     run_logger.save_screenshot(img, label="before_shop_nav")
 
-    # Tap the Shop button
-    try:
-        x, y = executor.find_element("Shop", retries=3)
-        executor.tap(x, y)
-    except RuntimeError:
-        # Try tapping shop icon by searching for the template
+    # Tap the Shop button — try each localized label in turn
+    _shop_labels = ("Shop", "Магазин", "Store")
+    tapped_shop = False
+    for label in _shop_labels:
+        try:
+            x, y = executor.find_element(label, retries=2)
+            executor.tap(x, y)
+            tapped_shop = True
+            break
+        except RuntimeError:
+            continue
+    if not tapped_shop:
         raise StepError(
-            "Could not find Shop button on main menu. "
+            "Could not find Shop button on main menu in any supported language. "
             "Ensure MLBB is on the main menu before running payment step."
         )
 
@@ -205,16 +228,19 @@ def _open_diamonds_section(
         logger.info("Already on Diamonds section", device_id=device_id)
         return
 
-    # Try to find and tap Diamonds tab
-    try:
-        x, y = executor.find_element("Diamonds", retries=3)
-        executor.tap(x, y)
-    except RuntimeError:
+    # Try to find and tap Diamonds tab — try each localized label
+    _diamond_labels = ("Diamonds", "Алмазы", "Top Up", "Пополнить", "Recharge")
+    tapped_diamonds = False
+    for label in _diamond_labels:
         try:
-            x, y = executor.find_element("Top Up", retries=2)
+            x, y = executor.find_element(label, retries=2)
             executor.tap(x, y)
+            tapped_diamonds = True
+            break
         except RuntimeError:
-            raise StepError("Could not find Diamonds/Top-Up tab in MLBB Shop")
+            continue
+    if not tapped_diamonds:
+        raise StepError("Could not find Diamonds/Top-Up tab in MLBB Shop in any supported language")
 
     time.sleep(2)
     img = executor.screenshot()
@@ -288,8 +314,8 @@ def _tap_buy(
     logger.info("Tapping Buy button", device_id=device_id)
     run_logger.log_step("payment", "tap_buy", device_id=device_id)
 
-    # Try "Buy" first, then "Purchase"
-    for label in ("Buy", "Purchase", "Купить"):
+    _buy_labels = ("Buy", "Purchase", "Купить", "Приобрести")
+    for label in _buy_labels:
         try:
             x, y = executor.find_element(label, retries=2)
             executor.tap(x, y)
@@ -301,7 +327,7 @@ def _tap_buy(
         except RuntimeError:
             continue
 
-    raise StepError("Could not find Buy/Purchase button for selected diamond pack")
+    raise StepError("Could not find Buy/Purchase button in any supported language")
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +338,7 @@ def _handle_google_pay(
     executor: AppiumExecutor,
     run_logger: RunLogger,
     device_id: str,
+    dry_run: bool = False,
 ) -> None:
     """
     Wait for the Google Pay sheet and confirm the payment.
@@ -319,6 +346,9 @@ def _handle_google_pay(
     Google Pay may appear:
       a) In NATIVE_APP context (bottom sheet overlay)
       b) In a WEBVIEW context (rendered web UI inside a bottom sheet)
+
+    In dry_run mode: wait for the sheet to appear (verifying the full checkout
+    flow rendered correctly), then return without tapping the Pay button.
 
     We try to confirm in NATIVE_APP first, then switch to each WEBVIEW
     context if needed.
@@ -346,6 +376,16 @@ def _handle_google_pay(
         raise StepError(
             f"Google Pay sheet did not appear within {_PAYMENT_SHEET_TIMEOUT}s"
         )
+
+    if dry_run:
+        # Verified the sheet rendered — stop before irreversible payment action
+        img = executor.screenshot()
+        run_logger.save_screenshot(img, label="dry_run_google_pay_sheet")
+        logger.info(
+            "DRY RUN — Google Pay sheet confirmed; skipping final payment tap",
+            device_id=device_id,
+        )
+        return
 
     # Try confirming in NATIVE_APP context first
     if _try_confirm_payment_native(executor, run_logger, device_id):
@@ -505,30 +545,54 @@ def _detect_payment_result(
 
         img = executor.screenshot()
 
-        # ── Stage 1: Template match ────────────────────────────────────────
-        success_template = matcher.find(img, "payment_success", threshold=0.75)
-        failed_template = matcher.find(img, "payment_failed", threshold=0.75)
+        # ── Stage 1: Template match (payment_success / payment_failed) ────────
+        success_template = matcher.find(img, "payment_success", threshold=_TEMPLATE_MATCH_THRESHOLD)
+        failed_template = matcher.find(img, "payment_failed", threshold=_TEMPLATE_MATCH_THRESHOLD)
 
-        # ── Stage 2: OCR text scan ─────────────────────────────────────────
+        # ── Stage 2: Payment-specific OCR text scan ────────────────────────
         ocr_results = ocr.read_region(img)
         texts = " ".join(r.text.lower() for r in ocr_results)
         ocr_success = any(s in texts for s in _SUCCESS_SIGNALS)
         ocr_failure = any(s in texts for s in _FAILURE_SIGNALS)
 
-        # ── Decision: template hit OR OCR hit (at least one must fire) ─────
-        if success_template is not None or ocr_success:
-            signal = "template" if success_template else "ocr"
+        # ── Decision logic ─────────────────────────────────────────────────
+        # Success requires template+OCR agreement, OR a very-high-confidence
+        # template alone (>= _TEMPLATE_STRONG_THRESHOLD), OR OCR-only match
+        # (these phrases are payment-specific so false-positive risk is low).
+        success_confirmed = (
+            (success_template is not None and ocr_success)          # both agree
+            or (success_template is not None
+                and success_template.confidence >= _TEMPLATE_STRONG_THRESHOLD)  # strong template
+            or ocr_success                                          # payment-specific OCR phrase
+        )
+        failure_confirmed = (
+            (failed_template is not None and ocr_failure)
+            or (failed_template is not None
+                and failed_template.confidence >= _TEMPLATE_STRONG_THRESHOLD)
+            or ocr_failure
+        )
+
+        if success_confirmed:
+            t_conf = round(success_template.confidence, 3) if success_template else None
+            signal = (
+                "template+ocr" if (success_template and ocr_success)
+                else ("template" if success_template else "ocr")
+            )
             logger.info(
                 "Payment success screen detected",
                 signal=signal,
-                template_confidence=round(success_template.confidence, 3) if success_template else None,
+                template_confidence=t_conf,
                 device_id=device_id,
             )
             run_logger.save_screenshot(img, label="payment_success")
             return "success"
 
-        if failed_template is not None or ocr_failure:
-            signal = "template" if failed_template else "ocr"
+        if failure_confirmed:
+            t_conf = round(failed_template.confidence, 3) if failed_template else None
+            signal = (
+                "template+ocr" if (failed_template and ocr_failure)
+                else ("template" if failed_template else "ocr")
+            )
             failure_text = next(
                 (r.text for r in ocr_results if any(s in r.text.lower() for s in _FAILURE_SIGNALS)),
                 "unknown_error",
@@ -537,7 +601,7 @@ def _detect_payment_result(
                 "Payment failure screen detected",
                 signal=signal,
                 failure_text=failure_text,
-                template_confidence=round(failed_template.confidence, 3) if failed_template else None,
+                template_confidence=t_conf,
                 device_id=device_id,
             )
             run_logger.save_screenshot(img, label="payment_failed")
