@@ -54,7 +54,7 @@ class TestListDevices:
     def _client(self, list_response) -> SelectelFarmClient:
         client = SelectelFarmClient(api_key="test-key")
         client._session = MagicMock()
-        client._session.get.return_value = _mock_response(list_response)
+        client._session.request.return_value = _mock_response(list_response)
         return client
 
     def test_returns_available_android_devices(self):
@@ -102,8 +102,11 @@ class TestAcquireDevice:
     def _client(self) -> SelectelFarmClient:
         client = SelectelFarmClient(api_key="test-key")
         session = MagicMock()
-        session.get.return_value = _mock_response([DEVICE_RAW])
-        session.post.return_value = _mock_response(RENT_START_RESPONSE)
+        # Return list on GET, rent response on POST
+        session.request.side_effect = lambda method, url, **kw: (
+            _mock_response([DEVICE_RAW]) if method == "GET"
+            else _mock_response(RENT_START_RESPONSE)
+        )
         client._session = session
         return client
 
@@ -118,7 +121,7 @@ class TestAcquireDevice:
     def test_acquire_device_raises_if_no_devices(self):
         client = SelectelFarmClient(api_key="test-key")
         client._session = MagicMock()
-        client._session.get.return_value = _mock_response([])
+        client._session.request.return_value = _mock_response([])
         with pytest.raises(RuntimeError, match="No available Android devices"):
             client.acquire_device()
 
@@ -128,8 +131,10 @@ class TestAcquireDevice:
             appium_url_override="https://my-custom-appium/wd/hub",
         )
         session = MagicMock()
-        session.get.return_value = _mock_response([DEVICE_RAW])
-        session.post.return_value = _mock_response(RENT_START_RESPONSE)
+        session.request.side_effect = lambda method, url, **kw: (
+            _mock_response([DEVICE_RAW]) if method == "GET"
+            else _mock_response(RENT_START_RESPONSE)
+        )
         client._session = session
 
         reserved = client.acquire_device()
@@ -153,8 +158,10 @@ class TestAcquireDeviceById:
     def _client(self) -> SelectelFarmClient:
         client = SelectelFarmClient(api_key="test-key")
         session = MagicMock()
-        session.get.return_value = _mock_response([DEVICE_RAW])
-        session.post.return_value = _mock_response(RENT_START_RESPONSE)
+        session.request.side_effect = lambda method, url, **kw: (
+            _mock_response([DEVICE_RAW]) if method == "GET"
+            else _mock_response(RENT_START_RESPONSE)
+        )
         client._session = session
         return client
 
@@ -173,7 +180,7 @@ class TestReleaseDevice:
     def test_release_calls_rent_stop(self):
         client = SelectelFarmClient(api_key="test-key")
         session = MagicMock()
-        session.post.return_value = _mock_response({"status": "ok"})
+        session.request.return_value = _mock_response({"status": "ok"})
         client._session = session
 
         reserved = ReservedDevice(
@@ -186,16 +193,18 @@ class TestReleaseDevice:
             session_id="rent-xyz",
         )
         client.release_device(reserved)
-        session.post.assert_called_once()
-        call_kwargs = session.post.call_args
-        assert "rent/stop" in call_kwargs[0][0] or "stop" in str(call_kwargs)
+        session.request.assert_called_once()
+        call_args = session.request.call_args
+        # First positional arg is method ("POST"), second is URL containing "stop"
+        assert "POST" in str(call_args)
+        assert "stop" in str(call_args).lower()
 
     def test_release_does_not_raise_on_http_error(self):
         client = SelectelFarmClient(api_key="test-key")
         session = MagicMock()
         error_resp = _mock_response({"error": "gone"}, status_code=404)
         error_resp.raise_for_status.side_effect = Exception("404")
-        session.post.return_value = error_resp
+        session.request.return_value = error_resp
         client._session = session
 
         reserved = ReservedDevice(

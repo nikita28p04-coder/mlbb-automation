@@ -214,20 +214,87 @@ class SelectelFarmClient(DeviceFarmClient):
             logger.warning("Failed to release device id=%s: %s", reserved.device_info.id, exc)
 
     # ------------------------------------------------------------------
-    # Internal HTTP helpers
+    # Internal HTTP helpers (with retry on transient errors)
     # ------------------------------------------------------------------
 
+    #: HTTP status codes that are safe to retry (server-side transient errors)
+    _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+    #: Number of automatic retries for transient HTTP errors
+    _HTTP_RETRIES = 3
+    #: Initial back-off in seconds (doubles on each attempt)
+    _HTTP_RETRY_DELAY = 1.0
+
     def _get(self, path: str, **kwargs) -> Response:
-        url = self._base_url + path
-        resp = self._session.get(url, timeout=self._timeout, **kwargs)
-        self._raise_for_status(resp)
-        return resp
+        return self._request("GET", path, **kwargs)
 
     def _post(self, path: str, **kwargs) -> Response:
+        return self._request("POST", path, **kwargs)
+
+    def _request(self, method: str, path: str, **kwargs) -> Response:
+        """
+        Execute an HTTP request with automatic retry on transient errors.
+
+        Retries on:
+          - Connection/read timeouts (``requests.Timeout``)
+          - Connection errors (``requests.ConnectionError``)
+          - HTTP 429, 5xx responses (rate-limit or server errors)
+
+        Args:
+            method: HTTP method string ("GET" or "POST").
+            path:   API path relative to base_url.
+
+        Returns:
+            The successful ``Response`` object.
+
+        Raises:
+            RuntimeError: After all retries are exhausted.
+        """
+        import time as _time
+
         url = self._base_url + path
-        resp = self._session.post(url, timeout=self._timeout, **kwargs)
-        self._raise_for_status(resp)
-        return resp
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, self._HTTP_RETRIES + 1):
+            try:
+                resp = self._session.request(
+                    method, url, timeout=self._timeout, **kwargs
+                )
+                if resp.status_code in self._RETRYABLE_STATUS and attempt < self._HTTP_RETRIES:
+                    delay = self._HTTP_RETRY_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Selectel API transient error, retrying",
+                        method=method,
+                        path=path,
+                        status=resp.status_code,
+                        attempt=attempt,
+                        retry_in=delay,
+                    )
+                    _time.sleep(delay)
+                    continue
+                self._raise_for_status(resp)
+                return resp
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                if attempt < self._HTTP_RETRIES:
+                    delay = self._HTTP_RETRY_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Selectel API network error, retrying",
+                        method=method,
+                        path=path,
+                        error=str(exc),
+                        attempt=attempt,
+                        retry_in=delay,
+                    )
+                    _time.sleep(delay)
+                else:
+                    raise RuntimeError(
+                        f"Selectel API {method} {path} failed after "
+                        f"{self._HTTP_RETRIES} retries: {exc}"
+                    ) from exc
+
+        raise RuntimeError(
+            f"Selectel API {method} {path} failed after {self._HTTP_RETRIES} retries"
+        )
 
     @staticmethod
     def _raise_for_status(resp: Response) -> None:

@@ -61,12 +61,21 @@ def _make_run_logger(tmp_path: Path) -> RunLogger:
 # ---------------------------------------------------------------------------
 
 class TestRetryLogic:
+    """
+    Test retry behaviour via a helper method that uses execute_script directly
+    (avoiding ActionBuilder internals which would require a real WebDriver session).
+    """
+
+    def _tap_via_execute_script(self, exe: AppiumExecutor):
+        """Use _retry directly to avoid ActionBuilder complexity in unit tests."""
+        return exe._retry(lambda: exe.driver.execute_script("mobile: test"))
+
     def test_succeeds_on_first_try(self, tmp_path):
         driver = MagicMock()
-        driver.execute_script.return_value = None
+        driver.execute_script.return_value = "ok"
         exe = _make_executor(driver)
 
-        exe.tap(100, 200)
+        exe._retry(lambda: exe.driver.execute_script("mobile: test"))
         assert driver.execute_script.call_count == 1
 
     def test_retries_on_stale_element_then_succeeds(self, tmp_path):
@@ -77,11 +86,11 @@ class TestRetryLogic:
             call_count["n"] += 1
             if call_count["n"] < 2:
                 raise StaleElementReferenceException("stale")
-            return None
+            return "ok"
 
         driver.execute_script.side_effect = flaky
         exe = _make_executor(driver, retry_count=3)
-        exe.tap(100, 200)
+        exe._retry(lambda: exe.driver.execute_script("mobile: test"))
         assert driver.execute_script.call_count == 2
 
     def test_raises_after_all_retries_exhausted(self, tmp_path):
@@ -90,7 +99,7 @@ class TestRetryLogic:
         exe = _make_executor(driver, retry_count=2)
 
         with pytest.raises(WebDriverException):
-            exe.tap(100, 200)
+            exe._retry(lambda: exe.driver.execute_script("mobile: test"))
 
         # retry_count=2 means 3 total attempts (initial + 2 retries)
         assert driver.execute_script.call_count == 3
@@ -101,7 +110,7 @@ class TestRetryLogic:
         exe = _make_executor(driver, retry_count=3)
 
         with pytest.raises(ValueError):
-            exe.tap(100, 200)
+            exe._retry(lambda: exe.driver.execute_script("mobile: test"))
 
         # Should not retry non-retryable exceptions
         assert driver.execute_script.call_count == 1
@@ -129,7 +138,7 @@ class TestFailureScreenshot:
         exe = _make_executor(driver, run_logger=run_logger, retry_count=1)
 
         with pytest.raises(WebDriverException):
-            exe.tap(100, 200)
+            exe._retry(lambda: exe.driver.execute_script("mobile: test"))
 
         # Screenshot should have been captured
         screenshots = list((tmp_path / "test-run" / "screenshots").glob("*.png"))
@@ -145,7 +154,7 @@ class TestFailureScreenshot:
         exe = _make_executor(driver, run_logger=None, retry_count=1)
 
         with pytest.raises(WebDriverException):
-            exe.tap(100, 200)
+            exe._retry(lambda: exe.driver.execute_script("mobile: test"))
 
         # No screenshot call when there's no run_logger
         driver.get_screenshot_as_png.assert_not_called()
@@ -161,7 +170,7 @@ class TestFailureScreenshot:
 
         # The original WebDriverException must propagate, not the screenshot error
         with pytest.raises(WebDriverException, match="original error"):
-            exe.tap(100, 200)
+            exe._retry(lambda: exe.driver.execute_script("mobile: test"))
 
 
 # ---------------------------------------------------------------------------

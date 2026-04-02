@@ -173,19 +173,63 @@ class AppiumExecutor:
     # ------------------------------------------------------------------
 
     def tap(self, x: int, y: int, duration_ms: int = 100) -> None:
-        """Tap at absolute screen coordinates."""
-        self._retry(lambda: self.driver.execute_script(
-            "mobile: clickGesture",
-            {"x": x, "y": y, "duration": duration_ms},
-        ))
+        """
+        Tap at absolute screen coordinates using the W3C Actions API.
+
+        Uses a touch pointer (pointer-down + pause + pointer-up) which is the
+        correct approach for Appium 2.x / UiAutomator2. No driver-specific
+        ``mobile:`` scripts are used, so this works across server versions.
+
+        Args:
+            x:           X coordinate in pixels.
+            y:           Y coordinate in pixels.
+            duration_ms: Hold duration before releasing (default 100 ms).
+        """
+        from selenium.webdriver.common.actions.action_builder import ActionBuilder
+        from selenium.webdriver.common.actions.pointer_input import PointerInput
+        from selenium.webdriver.common.actions import interaction
+
+        def _do_tap():
+            finger = PointerInput(interaction.POINTER_TOUCH, "finger")
+            builder = ActionBuilder(self.driver, mouse=finger)
+            (
+                builder.pointer_action
+                .move_to_location(x, y)
+                .pointer_down()
+                .pause(duration_ms / 1000.0)
+                .pointer_up()
+            )
+            builder.perform()
+
+        self._retry(_do_tap)
         self._record_action("tap", x=x, y=y, duration_ms=duration_ms)
 
     def long_press(self, x: int, y: int, duration_ms: int = 1500) -> None:
-        """Long-press at absolute screen coordinates."""
-        self._retry(lambda: self.driver.execute_script(
-            "mobile: longClickGesture",
-            {"x": x, "y": y, "duration": duration_ms},
-        ))
+        """
+        Long-press at absolute screen coordinates using the W3C Actions API.
+
+        Args:
+            x:           X coordinate in pixels.
+            y:           Y coordinate in pixels.
+            duration_ms: Hold duration in milliseconds (default 1500 ms).
+        """
+        from selenium.webdriver.common.actions.action_builder import ActionBuilder
+        from selenium.webdriver.common.actions.pointer_input import PointerInput
+        from selenium.webdriver.common.actions import interaction
+
+        def _do_long_press():
+            finger = PointerInput(interaction.POINTER_TOUCH, "finger")
+            builder = ActionBuilder(self.driver, mouse=finger)
+            (
+                builder.pointer_action
+                .move_to_location(x, y)
+                .pointer_down()
+                .pause(duration_ms / 1000.0)
+                .pointer_up()
+            )
+            builder.perform()
+
+        self._retry(_do_long_press)
         self._record_action("long_press", x=x, y=y, duration_ms=duration_ms)
 
     def swipe(
@@ -196,17 +240,36 @@ class AppiumExecutor:
         end_y: int,
         duration_ms: int = 400,
     ) -> None:
-        """Swipe from (start_x, start_y) to (end_x, end_y)."""
-        self._retry(lambda: self.driver.execute_script(
-            "mobile: swipeGesture",
-            {
-                "startX": start_x,
-                "startY": start_y,
-                "endX": end_x,
-                "endY": end_y,
-                "duration": duration_ms,
-            },
-        ))
+        """
+        Swipe from (start_x, start_y) to (end_x, end_y) using the W3C Actions API.
+
+        Uses a pointer-down → pause → move → pointer-up sequence, which is the
+        standard drag/swipe gesture for Appium 2.x / UiAutomator2. This avoids
+        driver-version-specific ``mobile:`` scripts.
+
+        Args:
+            start_x, start_y: Starting pixel coordinates.
+            end_x, end_y:     Ending pixel coordinates.
+            duration_ms:      Total gesture duration in milliseconds.
+        """
+        from selenium.webdriver.common.actions.action_builder import ActionBuilder
+        from selenium.webdriver.common.actions.pointer_input import PointerInput
+        from selenium.webdriver.common.actions import interaction
+
+        def _do_swipe():
+            finger = PointerInput(interaction.POINTER_TOUCH, "finger")
+            builder = ActionBuilder(self.driver, mouse=finger)
+            (
+                builder.pointer_action
+                .move_to_location(start_x, start_y)
+                .pointer_down()
+                .pause(duration_ms / 1000.0)
+                .move_to_location(end_x, end_y)
+                .pointer_up()
+            )
+            builder.perform()
+
+        self._retry(_do_swipe)
         self._record_action(
             "swipe",
             start_x=start_x, start_y=start_y,
