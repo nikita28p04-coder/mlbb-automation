@@ -53,14 +53,17 @@ mlbb_automation/
 ├── recovery/
 │   └── manager.py          # Freeze detection + auto-recovery
 ├── scenarios/
-│   ├── steps/
-│   │   ├── google_account.py   # Add Google account to device
-│   │   ├── install_mlbb.py     # Install MLBB from Play Store
-│   │   ├── mlbb_onboarding.py  # Skip onboarding, reach main menu
-│   │   └── payment.py          # Shop → Diamonds → Google Pay
-│   └── watchdog.py         # Background popup dismisser (Task #2)
-├── cv/                     # Computer vision / OCR (Task #2)
+│   └── steps/
+│       ├── google_account.py   # Add Google account to device [stub — Task #3]
+│       ├── install_mlbb.py     # Install MLBB from Play Store [stub — Task #3]
+│       ├── mlbb_onboarding.py  # Skip onboarding, reach main menu [stub — Task #3]
+│       └── payment.py          # Shop → Diamonds → Google Pay [stub — Task #3]
 └── __main__.py             # CLI entry point
+
+> **Note:** `cv/` (computer vision/OCR) and `scenarios/steps/` full implementation
+> are Task #2 and Task #3 respectively. Scenario steps currently run as stubs
+> and log `status=stub_ok`; no real device interactions happen yet. Use
+> `--dry-run` to understand the flow before real steps are implemented.
 ```
 
 ## Artifacts

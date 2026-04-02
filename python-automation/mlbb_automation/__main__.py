@@ -226,16 +226,23 @@ def _run_scenario(
         ),
     }
 
+    # Warn explicitly: all scenario steps are stubs until Task #3 is complete.
+    # The run will succeed (status=stub_ok) but no real device actions execute.
+    click.echo(
+        "\n[WARNING] Scenario steps are stubs — no real device interactions will occur.\n"
+        "          Full implementation is tracked in Task #3.\n"
+    )
+
     if step:
         # Run only the specified step
         if step not in steps_registry:
             raise ValueError(f"Unknown step: {step!r}. Valid steps: {list(steps_registry)}")
-        click.echo(f"Running single step: {step}")
+        click.echo(f"Running single step: {step} (stub)")
         steps_registry[step]()
     else:
         # Run all steps in order
         for step_name, step_fn in steps_registry.items():
-            click.echo(f"  → {step_name}")
+            click.echo(f"  → {step_name} (stub)")
             step_fn()
 
 
