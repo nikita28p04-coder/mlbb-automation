@@ -278,6 +278,66 @@ class TestFatalSteps:
         assert call_count[0] >= 2
         recovery.attempt_recovery.assert_called()
 
+    def test_non_retriable_exception_aborts_without_retry(self, tmp_path):
+        """
+        An exception with _is_non_retriable=True must abort immediately on the
+        first failure, without retrying or invoking recovery.
+
+        This prevents ScenarioRunner from re-running a step that already issued
+        an irreversible action (e.g. a payment charge).
+        """
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        recovery = _make_recovery()
+        runner = ScenarioRunner(exe, run_logger, recovery)
+
+        class IrreversibleError(Exception):
+            _is_non_retriable = True
+
+        call_count = [0]
+
+        def irreversible_step():
+            call_count[0] += 1
+            raise IrreversibleError("payment declined after charge")
+
+        runner.add_step(
+            Step("payment", fn=irreversible_step, max_retries=3, retry_delay=0)
+        )
+
+        with pytest.raises(ScenarioAborted) as exc_info:
+            runner.run()
+
+        # Must abort on the very first attempt
+        assert call_count[0] == 1
+        # Recovery must NOT be attempted (would risk duplicate charge)
+        recovery.attempt_recovery.assert_not_called()
+        assert "payment" in str(exc_info.value)
+
+    def test_payment_error_does_not_retry(self, tmp_path):
+        """PaymentError from payment.py is marked _is_non_retriable — no retry."""
+        exe = _make_executor()
+        run_logger = _make_run_logger(tmp_path)
+        recovery = _make_recovery()
+        runner = ScenarioRunner(exe, run_logger, recovery)
+
+        from mlbb_automation.scenarios.steps.payment import PaymentError
+
+        call_count = [0]
+
+        def payment_step():
+            call_count[0] += 1
+            raise PaymentError("Transaction declined")
+
+        runner.add_step(
+            Step("payment", fn=payment_step, max_retries=3, retry_delay=0)
+        )
+
+        with pytest.raises(ScenarioAborted):
+            runner.run()
+
+        assert call_count[0] == 1
+        recovery.attempt_recovery.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # start_from (skip)

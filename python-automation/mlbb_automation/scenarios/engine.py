@@ -196,6 +196,15 @@ class ScenarioRunner:
                         f"Fatal step '{step.name}' failed (attempt {attempt}): {last_error}"
                     )
 
+                # Exceptions tagged as non-retriable abort immediately to prevent
+                # dangerous repeat execution (e.g. duplicate payment charges).
+                # A class signals this by defining _is_non_retriable = True.
+                if getattr(type(exc), "_is_non_retriable", False):
+                    raise ScenarioAborted(
+                        f"Non-retriable error in step '{step.name}' "
+                        f"(attempt {attempt}): {last_error}"
+                    )
+
                 if attempt < step.max_retries:
                     time.sleep(step.retry_delay)
                     continue

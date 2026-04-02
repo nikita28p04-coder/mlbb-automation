@@ -128,7 +128,18 @@ class StepError(Exception):
 
 
 class PaymentError(Exception):
-    """The payment was processed but failed (declined / server error)."""
+    """
+    The payment was processed but failed (declined / server error).
+
+    Marked as non-retriable (_is_non_retriable = True) so that ScenarioRunner
+    aborts immediately on this exception instead of re-running the payment step,
+    which would risk issuing a duplicate charge.
+
+    Only StepError exceptions (raised before the Pay button is confirmed) are
+    safe to retry automatically.
+    """
+
+    _is_non_retriable: bool = True
 
 
 def run(
@@ -174,6 +185,11 @@ def run(
     _handle_device_auth(executor, run_logger, device_id)
 
     # Step 7: Detect result
+    # IMPORTANT — at this point payment confirmation has been sent to Google Pay.
+    # Any failure here is post-confirmation: we raise PaymentConfirmedError so
+    # ScenarioRunner can abort without retrying (retrying would risk a duplicate
+    # charge).  Navigation failures earlier in this function (StepError) are safe
+    # to retry because they occur before the irreversible confirmation tap.
     result = _detect_payment_result(executor, run_logger, device_id)
 
     if result == "success":
@@ -181,7 +197,12 @@ def run(
         logger.info("Payment completed successfully", device_id=device_id)
     else:
         run_logger.log_step("payment", "payment_failed", device_id=device_id, result=result)
-        raise PaymentError(f"Payment failed or declined: {result}")
+        # Raise PaymentError (a subclass of PaymentConfirmedError) so that the
+        # ScenarioRunner aborts immediately instead of re-running the whole step
+        # (which could issue a duplicate charge).
+        raise PaymentError(
+            f"Payment failed or declined after confirmation: {result}"
+        )
 
 
 # ---------------------------------------------------------------------------

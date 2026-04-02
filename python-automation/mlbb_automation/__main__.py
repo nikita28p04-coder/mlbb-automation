@@ -243,8 +243,15 @@ def _run_scenario(
                 device_id=device_id,
                 dry_run=dry_run,
             ),
+            # Payment step uses the same retry/recovery model as other steps.
+            # Retries are safe for UI-navigation failures (Shop navigation,
+            # Google Pay sheet not appearing) because no money is charged until
+            # the Pay button is confirmed.  PaymentError (charge declined after
+            # confirmation) is raised directly from payment.run() and will be
+            # caught by the runner; ScenarioRunner will attempt recovery, then
+            # give up after max_retries — which is the correct behavior
+            # (operator reviews the report and decides whether to retry manually).
             max_retries=settings.retry_count,
-            fatal=True,  # Payment step failure is always fatal
         ),
     ]
 
