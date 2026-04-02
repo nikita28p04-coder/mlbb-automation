@@ -492,6 +492,10 @@ class AppiumExecutor:
                             "find_element",
                             text=text,
                             stage="template",
+                            template=template_name,
+                            confidence=round(result.confidence, 3),
+                            cx=result.cx,
+                            cy=result.cy,
                             attempt=attempt,
                         )
                         return result.cx, result.cy
@@ -509,6 +513,10 @@ class AppiumExecutor:
                         "find_element",
                         text=text,
                         stage="ocr",
+                        matched_text=ocr_result.text,
+                        confidence=round(ocr_result.confidence, 3),
+                        cx=ocr_result.cx,
+                        cy=ocr_result.cy,
                         attempt=attempt,
                     )
                     return ocr_result.cx, ocr_result.cy
@@ -516,7 +524,7 @@ class AppiumExecutor:
             except Exception as exc:
                 stage_errors.append(f"stage2/ocr error: {exc}")
 
-            # Stage 3: Appium UI hierarchy
+            # Stage 3: Appium UI hierarchy — @text attribute
             try:
                 el = self.find_element_by_text(text, timeout=5)
                 if el is not None:
@@ -527,13 +535,36 @@ class AppiumExecutor:
                     self._record_action(
                         "find_element",
                         text=text,
-                        stage="appium",
+                        stage="appium_text",
+                        cx=cx,
+                        cy=cy,
                         attempt=attempt,
                     )
                     return cx, cy
-                stage_errors.append(f"stage3/appium '{text}': not found")
+                stage_errors.append(f"stage3/appium_text '{text}': not found")
             except Exception as exc:
-                stage_errors.append(f"stage3/appium error: {exc}")
+                stage_errors.append(f"stage3/appium_text error: {exc}")
+
+            # Stage 3b: Appium UI hierarchy — content-desc attribute
+            try:
+                el = self.find_element_by_content_desc(text, timeout=5)
+                if el is not None:
+                    loc = el.location
+                    sz = el.size
+                    cx = loc["x"] + sz["width"] // 2
+                    cy = loc["y"] + sz["height"] // 2
+                    self._record_action(
+                        "find_element",
+                        text=text,
+                        stage="appium_content_desc",
+                        cx=cx,
+                        cy=cy,
+                        attempt=attempt,
+                    )
+                    return cx, cy
+                stage_errors.append(f"stage3b/appium_content_desc '{text}': not found")
+            except Exception as exc:
+                stage_errors.append(f"stage3b/appium_content_desc error: {exc}")
 
             last_errors = stage_errors
             if attempt < retries:
