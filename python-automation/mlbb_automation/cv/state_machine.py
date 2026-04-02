@@ -240,86 +240,86 @@ class StateMachine:
     def _register_transitions(self) -> None:
         """Register all known screen transitions.
 
-        Actions receive the executor as their only argument.
-        Coordinates are approximate 1080×1920 reference values;
-        adjust via config or template matching in real runs.
+        Actions use the 3-stage element finder (template → OCR → Appium tree).
+        No hard-coded coordinates.  If the element is not found, NavigationError
+        propagates so the caller retries or surfaces the failure with diagnostics.
         """
-        exe = self._executor
         T = Transition
 
-        def _tap(x: int, y: int, label: str = "") -> Callable:
-            def action(e):
-                e.tap(x, y)
-            action.__name__ = label or f"tap_{x}_{y}"
-            return action
-
-        def _find_and_tap_text(text: str, fallback_xy: Tuple[int, int]) -> Callable:
+        def _find_and_tap(
+            text: str,
+            template_name: Optional[str] = None,
+            retries: int = 2,
+        ) -> Callable:
             """
             3-stage element search: template → OCR → Appium hierarchy.
-            Falls back to hard-coded coordinates if find_element raises.
+            Raises NavigationError (wrapping RuntimeError) when all stages fail
+            so that StateMachine.navigate_to() can retry or report precisely.
             """
             def action(e):
                 try:
-                    x, y = e.find_element(text, retries=2, retry_delay=1.0)
-                    e.tap(x, y)
-                except RuntimeError:
-                    logger.warning(
-                        "find_and_tap fell back to coords for '%s' at %s",
+                    x, y = e.find_element(
                         text,
-                        fallback_xy,
+                        template_name=template_name,
+                        retries=retries,
+                        retry_delay=1.0,
                     )
-                    e.tap(*fallback_xy)
+                    e.tap(x, y)
+                except RuntimeError as exc:
+                    raise NavigationError(
+                        f"find_and_tap('{text}', template='{template_name}'): {exc}"
+                    ) from exc
             action.__name__ = f"find_and_tap_{text}"
             return action
 
         self._transitions = [
-            # MLBB loading → main menu (just wait, loading finishes on its own)
+            # MLBB loading → main menu: wait for loading animation to finish
             T(
                 ScreenState.MLBB_LOADING,
                 ScreenState.MLBB_MAIN_MENU,
                 action=lambda e: time.sleep(3),
                 label="wait_mlbb_loaded",
             ),
-            # Main menu → shop (tap shop icon, approximate position)
+            # Main menu → shop: find the Shop button via template or OCR
             T(
                 ScreenState.MLBB_MAIN_MENU,
                 ScreenState.MLBB_SHOP,
-                action=_find_and_tap_text("Shop", fallback_xy=(540, 1750)),
+                action=_find_and_tap("Shop", template_name="shop_icon"),
                 label="open_shop",
             ),
-            # Shop → diamonds section
+            # Shop → diamonds section: find the Diamonds tab via template or OCR
             T(
                 ScreenState.MLBB_SHOP,
                 ScreenState.MLBB_SHOP_DIAMONDS,
-                action=_find_and_tap_text("Diamonds", fallback_xy=(180, 400)),
+                action=_find_and_tap("Diamonds", template_name="diamonds_tab"),
                 label="open_diamonds",
             ),
-            # Diamonds → payment selection (tap smallest pack then Buy)
+            # Diamonds → payment selection: find the Buy button via template or OCR
             T(
                 ScreenState.MLBB_SHOP_DIAMONDS,
                 ScreenState.MLBB_PAYMENT,
-                action=_find_and_tap_text("Buy", fallback_xy=(540, 1700)),
+                action=_find_and_tap("Buy", template_name="buy_button"),
                 label="tap_buy",
             ),
-            # Payment selection → Google Pay sheet
+            # Payment selection → Google Pay sheet: find Google Pay option
             T(
                 ScreenState.MLBB_PAYMENT,
                 ScreenState.GOOGLE_PAY_SHEET,
-                action=_find_and_tap_text("Google Pay", fallback_xy=(540, 900)),
+                action=_find_and_tap("Google Pay", template_name="google_pay_logo"),
                 label="select_google_pay",
             ),
-            # Google Pay sheet → payment success (tap Pay button)
+            # Google Pay sheet → payment success: confirm the payment
             T(
                 ScreenState.GOOGLE_PAY_SHEET,
                 ScreenState.PAYMENT_SUCCESS,
-                action=_find_and_tap_text("Pay", fallback_xy=(540, 1700)),
+                action=_find_and_tap("Pay", template_name="google_pay_logo"),
                 label="confirm_payment",
             ),
-            # UNKNOWN → try going home and re-detect
+            # Recovery: press Home and wait for MLBB main menu
             T(
                 ScreenState.UNKNOWN,
                 ScreenState.MLBB_MAIN_MENU,
-                action=lambda e: (e.press_key(3), time.sleep(2)),  # Home key
+                action=lambda e: (e.press_key(3), time.sleep(2)),
                 label="recover_to_main_menu",
             ),
         ]

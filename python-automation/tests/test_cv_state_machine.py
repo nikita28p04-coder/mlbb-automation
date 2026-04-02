@@ -186,6 +186,31 @@ class TestTransitionExecution:
 
 
 # ---------------------------------------------------------------------------
+# Strict no-fallback behaviour
+# ---------------------------------------------------------------------------
+
+class TestStrictNoFallback:
+    def test_find_and_tap_raises_navigation_error_when_element_not_found(self):
+        """
+        When all 3 stages (template, OCR, Appium) fail, the transition action must
+        raise NavigationError — NOT silently tap a hard-coded coordinate.
+        """
+        exe = _mock_executor()
+        machine = _make_machine(
+            exe,
+            detect_sequence=[ScreenState.MLBB_MAIN_MENU],
+        )
+        # Let the state machine use its real registered transitions but patch
+        # find_element so it always raises (simulating all 3 stages failing)
+        with patch.object(exe, "find_element", side_effect=RuntimeError("all stages failed")):
+            with pytest.raises(NavigationError, match="find_and_tap"):
+                machine.navigate_to(ScreenState.MLBB_SHOP, max_retries=1)
+
+        # The executor must NOT have been asked to tap any coordinates
+        exe.tap.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Retry behaviour
 # ---------------------------------------------------------------------------
 

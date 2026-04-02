@@ -23,7 +23,8 @@ Replace them with real screenshots from your target device(s) before running the
 | `shop_icon.png` | screen_detector, state_machine | MLBB shop icon in main menu nav bar |
 | `main_menu_bg.png` | screen_detector | MLBB main menu background indicator |
 | `mlbb_loading_logo.png` | screen_detector | MLBB loading screen logo |
-| `buy_button.png` | screen_detector | "Buy" button in diamonds shop |
+| `buy_button.png` | screen_detector, state_machine | "Buy" button in diamonds shop |
+| `diamonds_tab.png` | state_machine | "Diamonds" tab in the MLBB shop |
 | `close_button.png` | watchdog | Generic close/X button in popups |
 | `x_button.png` | watchdog | Ad banner close button |
 | `dialog_ok.png` | watchdog | Android system dialog OK button |
