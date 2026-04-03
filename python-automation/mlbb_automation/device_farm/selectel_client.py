@@ -32,6 +32,23 @@ from .base import DeviceFarmClient, DeviceInfo, ReservedDevice
 
 logger = logging.getLogger(__name__)
 
+
+def _mask_proxy(proxy_url: str) -> str:
+    """Return proxy URL with password replaced by '***' for safe logging."""
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(proxy_url)
+        if parsed.password:
+            masked = parsed._replace(
+                netloc=f"{parsed.username}:***@{parsed.hostname}"
+                + (f":{parsed.port}" if parsed.port else "")
+            )
+            return urlunparse(masked)
+    except Exception:
+        pass
+    return proxy_url
+
+
 # --------------------------------------------------------------------------
 # Configurable endpoint paths (adjust if Selectel changes their API)
 # --------------------------------------------------------------------------
@@ -65,6 +82,7 @@ class SelectelFarmClient(DeviceFarmClient):
         base_url: str = "https://mf.selectel.ru/api/v1",
         timeout: int = 30,
         appium_url_override: Optional[str] = None,
+        proxy_url: Optional[str] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -78,6 +96,11 @@ class SelectelFarmClient(DeviceFarmClient):
                 "Content-Type": "application/json",
             }
         )
+        if proxy_url:
+            # Apply proxy for both http and https traffic.
+            # Supports HTTP, HTTPS, and SOCKS5 (requires requests[socks]).
+            self._session.proxies.update({"http": proxy_url, "https": proxy_url})
+            logger.info("Selectel client using proxy: %s", _mask_proxy(proxy_url))
 
     # ------------------------------------------------------------------
     # DeviceFarmClient interface
@@ -325,4 +348,5 @@ def create_client_from_settings(settings) -> SelectelFarmClient:
         base_url=settings.selectel_api_url,
         timeout=settings.action_timeout_seconds,
         appium_url_override=settings.appium_url,  # None → no override
+        proxy_url=settings.proxy_url,             # None → no proxy
     )

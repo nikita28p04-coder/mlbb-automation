@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     # --- Device preferences ---
     device_filter: DeviceFilter = Field(default_factory=DeviceFilter)
 
+    # --- Proxy (for accessing Selectel Farm from non-RU IPs) ---
+    proxy_url: Optional[str] = Field(
+        default=None,
+        description=(
+            "HTTPS/SOCKS5 proxy URL used for all Selectel API requests. "
+            "Required when running outside Russia (geo-blocked). "
+            "Examples: "
+            "  http://user:pass@proxy.example.com:8080 "
+            "  socks5://user:pass@proxy.example.com:1080 "
+            "Can also be set via env: MLBB_PROXY_URL"
+        ),
+    )
+
     # --- Appium ---
     appium_url: Optional[str] = Field(
         default=None,

@@ -2,6 +2,15 @@
 selectel_api_key: "your-selectel-api-key-here"
 selectel_api_url: "https://mf.selectel.ru/api/v1"
 
+# Proxy for Selectel API requests (required if running outside Russia).
+# The Selectel Mobile Farm API is geo-restricted to Russian IPs.
+# Supported formats:
+#   HTTP/HTTPS proxy:  http://user:pass@host:port
+#   SOCKS5 proxy:      socks5://user:pass@host:port
+# For SOCKS5, install the extra dependency: pip install requests[socks]
+# Can also be set via env: MLBB_PROXY_URL=socks5://user:pass@host:1080
+proxy_url: null   # null = no proxy (direct connection)
+
 # Google account credentials (no 2FA required)
 google_email: "your-email@gmail.com"
 google_password: "your-password"
