@@ -1,15 +1,25 @@
-# Selectel Mobile Farm configuration
-selectel_api_key: "your-selectel-api-key-here"
+# ---------------------------------------------------------------------------
+# Selectel Mobile Farm — IAM authentication
+# ---------------------------------------------------------------------------
+# Mobile Farm requires IAM tokens, NOT static API keys.
+# Docs: https://docs.selectel.ru/api/authorization/
+#
+# How to find these values:
+#   selectel_username:   Control panel → Account → Users → Service Users → name
+#   selectel_account_id: Shown in the top-right corner of my.selectel.ru
+#   selectel_password:   Service user password (set when creating the user)
+#
+# Env var equivalents:
+#   MLBB_SELECTEL_USERNAME, MLBB_SELECTEL_ACCOUNT_ID, MLBB_SELECTEL_PASSWORD
+selectel_username: "user-xxxxxxxx"
+selectel_account_id: "12345678"
+selectel_password: "your-service-user-password"
 selectel_api_url: "https://mf.selectel.ru/api/v1"
 
-# Proxy for Selectel API requests (required if running outside Russia).
-# The Selectel Mobile Farm API is geo-restricted to Russian IPs.
-# Supported formats:
-#   HTTP/HTTPS proxy:  http://user:pass@host:port
-#   SOCKS5 proxy:      socks5://user:pass@host:port
-# For SOCKS5, install the extra dependency: pip install requests[socks]
-# Can also be set via env: MLBB_PROXY_URL=socks5://user:pass@host:1080
-proxy_url: null   # null = no proxy (direct connection)
+# Proxy (optional — only needed if mf.selectel.ru is blocked from your network)
+# Supported: http://user:pass@host:port  or  socks5://user:pass@host:1080
+# Env: MLBB_PROXY_URL
+proxy_url: null
 
 # Google account credentials (no 2FA required)
 google_email: "your-email@gmail.com"

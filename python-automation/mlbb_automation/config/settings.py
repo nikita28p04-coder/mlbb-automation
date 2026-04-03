@@ -44,11 +44,30 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Selectel Mobile Farm ---
-    selectel_api_key: str = Field(..., description="Selectel API key for farm access")
+    # --- Selectel Mobile Farm (IAM auth) ---
+    # Mobile Farm requires IAM tokens (X-Auth-Token), NOT static API keys.
+    # Docs: https://docs.selectel.ru/api/authorization/
+    selectel_username: str = Field(
+        ...,
+        description=(
+            "Selectel service user name. "
+            "Find it in: Control panel → Account → Users → Service Users."
+        ),
+    )
+    selectel_account_id: str = Field(
+        ...,
+        description=(
+            "Selectel numeric account ID (shown in top-right of control panel). "
+            "Used as the 'domain name' in Keystone auth requests."
+        ),
+    )
+    selectel_password: str = Field(
+        ...,
+        description="Selectel service user password.",
+    )
     selectel_api_url: str = Field(
         default="https://mf.selectel.ru/api/v1",
-        description="Base URL of the Selectel Mobile Farm API",
+        description="Base URL of the Selectel Mobile Farm API.",
     )
 
     # --- Google account (no 2FA) ---

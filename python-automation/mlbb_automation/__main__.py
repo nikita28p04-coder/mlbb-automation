@@ -102,9 +102,19 @@ def check(config: str) -> None:
         sys.exit(1)
 
     _row(
-        "MLBB_SELECTEL_API_KEY set",
-        bool(settings.selectel_api_key),
-        "hidden" if settings.selectel_api_key else "missing",
+        "MLBB_SELECTEL_USERNAME set",
+        bool(settings.selectel_username),
+        settings.selectel_username if settings.selectel_username else "missing",
+    )
+    _row(
+        "MLBB_SELECTEL_ACCOUNT_ID set",
+        bool(settings.selectel_account_id),
+        settings.selectel_account_id if settings.selectel_account_id else "missing",
+    )
+    _row(
+        "MLBB_SELECTEL_PASSWORD set",
+        bool(settings.selectel_password),
+        "hidden" if settings.selectel_password else "missing",
     )
     _row(
         "MLBB_GOOGLE_EMAIL set",

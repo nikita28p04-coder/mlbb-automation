@@ -1,19 +1,31 @@
 """
 Selectel Mobile Farm API client.
 
-API reference (based on Selectel's documented endpoints):
+API reference (Selectel docs: https://docs.selectel.ru/api/mobile-farm/):
   GET  /devices                  — list devices
   POST /rent/start               — reserve a device
   POST /rent/stop                — release a device
 
-Authentication: Bearer token via Authorization header.
+Authentication (per https://docs.selectel.ru/api/authorization/):
+  Mobile Farm supports ONLY IAM tokens — NOT static API keys.
+  The IAM token is passed in the X-Auth-Token header.
 
-Assumption: The farm returns an Appium/WebDriver URL and capabilities
-in the reservation response. If the actual endpoint paths differ, update
-the constants at the top of this file.
+  IAM token is obtained by POSTing service-user credentials to:
+    https://cloud.api.selcloud.ru/identity/v3/auth/tokens
+  Token TTL: 24 hours. This client auto-refreshes when the token expires.
+
+Required credentials (set via env or config.yaml):
+  MLBB_SELECTEL_USERNAME    — service user name (e.g. "user-abc123")
+  MLBB_SELECTEL_ACCOUNT_ID  — numeric Selectel account ID
+  MLBB_SELECTEL_PASSWORD    — service user password
 
 Usage:
-    client = SelectelFarmClient(api_key="...", base_url="https://mf.selectel.ru/api/v1")
+    client = SelectelFarmClient(
+        username="user-abc123",
+        account_id="12345678",
+        password="secret",
+        base_url="https://mf.selectel.ru/api/v1",
+    )
     reserved = client.acquire_device(platform_version="12")
     # ... run Appium session ...
     client.release_device(reserved)
@@ -31,6 +43,81 @@ from requests import Response, Session
 from .base import DeviceFarmClient, DeviceInfo, ReservedDevice
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# IAM token helpers
+# ---------------------------------------------------------------------------
+
+_KEYSTONE_URL = "https://cloud.api.selcloud.ru/identity/v3/auth/tokens"
+_TOKEN_TTL_SECONDS = 23 * 3600  # refresh 1 hour before 24h expiry
+
+
+class _IamTokenProvider:
+    """
+    Fetches and caches a Selectel IAM token for account scope.
+
+    The token is obtained from the Keystone endpoint and passed as
+    X-Auth-Token in every Mobile Farm API request.
+    """
+
+    def __init__(self, username: str, account_id: str, password: str) -> None:
+        self._username = username
+        self._account_id = account_id
+        self._password = password
+        self._token: Optional[str] = None
+        self._expires_at: float = 0.0
+
+    def get(self) -> str:
+        """Return a valid IAM token, refreshing if necessary."""
+        if self._token and time.time() < self._expires_at:
+            return self._token
+        self._refresh()
+        assert self._token is not None
+        return self._token
+
+    def _refresh(self) -> None:
+        payload = {
+            "auth": {
+                "identity": {
+                    "methods": ["password"],
+                    "password": {
+                        "user": {
+                            "name": self._username,
+                            "domain": {"name": self._account_id},
+                            "password": self._password,
+                        }
+                    },
+                },
+                "scope": {"domain": {"name": self._account_id}},
+            }
+        }
+        try:
+            resp = requests.post(
+                _KEYSTONE_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Failed to obtain Selectel IAM token from {_KEYSTONE_URL}: {exc}"
+            ) from exc
+
+        token = resp.headers.get("X-Subject-Token")
+        if not token:
+            raise RuntimeError(
+                "Selectel IAM token response did not contain X-Subject-Token header. "
+                f"Status: {resp.status_code}, body: {resp.text[:300]}"
+            )
+        self._token = token
+        self._expires_at = time.time() + _TOKEN_TTL_SECONDS
+        logger.info(
+            "Selectel IAM token refreshed (expires in ~23h). "
+            "account_id=%s username=%s",
+            self._account_id,
+            self._username,
+        )
 
 
 def _mask_proxy(proxy_url: str) -> str:
@@ -70,15 +157,25 @@ class SelectelFarmClient(DeviceFarmClient):
     """
     HTTP client for the Selectel Mobile Farm REST API.
 
+    Authentication uses IAM tokens (X-Auth-Token header) as required by
+    Selectel documentation. The token is automatically fetched and refreshed
+    using service-user credentials against the Keystone endpoint.
+
     Args:
-        api_key:  Selectel API key (Bearer token).
-        base_url: Base URL of the farm API.
-        timeout:  HTTP request timeout in seconds.
+        username:   Selectel service user name.
+        account_id: Selectel numeric account ID.
+        password:   Selectel service user password.
+        base_url:   Base URL of the Mobile Farm API.
+        timeout:    HTTP request timeout in seconds.
+        appium_url_override: If set, overrides the Appium URL from the farm.
+        proxy_url:  Optional HTTP/SOCKS5 proxy URL.
     """
 
     def __init__(
         self,
-        api_key: str,
+        username: str,
+        account_id: str,
+        password: str,
         base_url: str = "https://mf.selectel.ru/api/v1",
         timeout: int = 30,
         appium_url_override: Optional[str] = None,
@@ -86,19 +183,16 @@ class SelectelFarmClient(DeviceFarmClient):
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
-        # When set, this URL always overrides whatever the farm API returns.
         self._appium_url_override: Optional[str] = appium_url_override
+        self._iam = _IamTokenProvider(username, account_id, password)
         self._session: Session = requests.Session()
         self._session.headers.update(
             {
-                "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
             }
         )
         if proxy_url:
-            # Apply proxy for both http and https traffic.
-            # Supports HTTP, HTTPS, and SOCKS5 (requires requests[socks]).
             self._session.proxies.update({"http": proxy_url, "https": proxy_url})
             logger.info("Selectel client using proxy: %s", _mask_proxy(proxy_url))
 
@@ -279,6 +373,10 @@ class SelectelFarmClient(DeviceFarmClient):
 
         for attempt in range(1, self._HTTP_RETRIES + 1):
             try:
+                # Inject a fresh (or cached) IAM token on every request.
+                # The provider refreshes automatically when within 1h of expiry.
+                iam_token = self._iam.get()
+                self._session.headers["X-Auth-Token"] = iam_token
                 resp = self._session.request(
                     method, url, timeout=self._timeout, **kwargs
                 )
@@ -340,13 +438,16 @@ def create_client_from_settings(settings) -> SelectelFarmClient:
     """
     Convenience factory — creates a SelectelFarmClient from a Settings object.
 
-    Propagates settings.appium_url as an override so any Appium URL returned
-    by the farm is replaced with the value from configuration.
+    Uses IAM token auth (X-Auth-Token) as required by Selectel's Mobile Farm API.
+    Credentials are taken from settings: selectel_username / selectel_account_id /
+    selectel_password.
     """
     return SelectelFarmClient(
-        api_key=settings.selectel_api_key,
+        username=settings.selectel_username,
+        account_id=settings.selectel_account_id,
+        password=settings.selectel_password,
         base_url=settings.selectel_api_url,
         timeout=settings.action_timeout_seconds,
-        appium_url_override=settings.appium_url,  # None → no override
-        proxy_url=settings.proxy_url,             # None → no proxy
+        appium_url_override=settings.appium_url,
+        proxy_url=settings.proxy_url,
     )
