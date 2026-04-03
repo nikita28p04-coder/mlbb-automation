@@ -63,6 +63,64 @@ def devices(config: str, platform_version: Optional[str], model: Optional[str]) 
 # `check` — pre-flight validation of credentials and connectivity
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# `setup-adb` — generate ADB key pair and print the public key for Selectel
+# ---------------------------------------------------------------------------
+
+@cli.command("setup-adb")
+@click.option(
+    "--key-path",
+    default="~/.android/adbkey",
+    show_default=True,
+    help="Path where the ADB private key will be stored.",
+)
+def setup_adb(key_path: str) -> None:
+    """
+    Generate an ADB RSA key pair and print the public key for Selectel registration.
+
+    \b
+    Steps after running this command:
+      1. Copy the QAAAA... public key printed below
+      2. Open: https://my.selectel.ru → Account → Access → ADB Keys
+      3. Click "Add key" and paste the public key
+      4. Run: python -m mlbb_automation check   (verifies everything is ready)
+    """
+    from pathlib import Path
+    from .device_farm.adb_connector import AdbConnector, AdbError
+
+    resolved = str(Path(key_path).expanduser())
+    connector = AdbConnector(key_path=Path(resolved))
+
+    click.echo(f"\nADB key path: {resolved}")
+
+    try:
+        click.echo("Generating ADB key pair...")
+        connector.ensure_key()
+        pub_key = connector.get_public_key()
+    except AdbError as exc:
+        click.echo(click.style(f"\nERROR: {exc}", fg="red"), err=True)
+        sys.exit(1)
+
+    if connector.is_key_valid():
+        click.echo(click.style("  ✓  Key generated successfully\n", fg="green"))
+    else:
+        click.echo(click.style("  ⚠  Key was generated but format looks unexpected\n", fg="yellow"))
+
+    click.echo("Public key (add this to Selectel → Account → Access → ADB Keys):")
+    click.echo("─" * 60)
+    click.echo(pub_key)
+    click.echo("─" * 60)
+    click.echo(
+        "\nOnce the key is registered, run:\n"
+        "  python -m mlbb_automation check\n"
+        "to verify ADB connectivity.\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `check` — pre-flight validation of credentials and connectivity
+# ---------------------------------------------------------------------------
+
 @cli.command()
 @click.option("--config", default="config.yaml", show_default=True, help="Path to config YAML file.")
 def check(config: str) -> None:
@@ -70,12 +128,15 @@ def check(config: str) -> None:
     Validate configuration and connectivity before a real run.
 
     Checks:
-      1. Required settings are present (Selectel API key, Google credentials)
-      2. Selectel API is reachable and the key is valid
-      3. At least one Android device is available on the farm
-      4. Template images directory is present
+      1. Required settings are present (Selectel credentials, Google credentials)
+      2. ADB key exists and has the correct QAAAA format
+      3. Selectel API is reachable
+      4. At least one Android device is available on the farm
+      5. Template images directory is present
     """
     from .device_farm.selectel_client import create_client_from_settings
+    from .device_farm.adb_connector import AdbConnector
+    from pathlib import Path
     import os
 
     all_ok = True
@@ -132,7 +193,31 @@ def check(config: str) -> None:
         "set" if settings.payment_pin else "not set — PIN/biometric prompts will be cancelled",
     )
 
-    # ── 2. Selectel API connectivity ─────────────────────────────────────────
+    # ── 2. ADB key ───────────────────────────────────────────────────────────
+    click.echo()
+    adb_key_path = Path(str(settings.adb_key_path)).expanduser()
+    try:
+        adb_connector = AdbConnector(key_path=adb_key_path)
+        key_valid = adb_connector.is_key_valid()
+        _row(
+            "ADB key file exists",
+            key_valid,
+            str(adb_key_path) + (".pub" if not key_valid else ""),
+        )
+        if key_valid:
+            pub_key = adb_connector.get_public_key()
+            preview = pub_key[:30] + "..."
+            _row("ADB public key format (QAAAA...)", pub_key.startswith("QAAAA"), preview)
+        else:
+            _row(
+                "ADB public key format (QAAAA...)",
+                False,
+                "run: python -m mlbb_automation setup-adb",
+            )
+    except Exception as exc:
+        _row("ADB key check", False, str(exc))
+
+    # ── 3. Selectel API connectivity ─────────────────────────────────────────
     click.echo()
     try:
         client = create_client_from_settings(settings)
@@ -266,7 +351,7 @@ def run(
         )
         click.echo(f"Reserved device: {reserved.device_info.model} (id={reserved.device_info.id})")
 
-        # 2. Start Appium session
+        # 2. Start Appium session (ADB connect happens inside start_session)
         executor = AppiumExecutor(
             reserved,
             retry_count=settings.retry_count,
@@ -274,6 +359,7 @@ def run(
             action_timeout=settings.action_timeout_seconds,
             device_id=reserved.device_info.id,
             run_logger=run_logger,
+            adb_key_path=str(settings.adb_key_path),
         )
         with executor:
             # RecoveryManager: freeze detection + app relaunch

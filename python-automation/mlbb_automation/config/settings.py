@@ -100,10 +100,42 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- ADB connection (Selectel Mobile Farm) ---
+    # Selectel devices are connected via ADB over TCP before starting Appium.
+    # The ADB public key must be registered in:
+    #   Control Panel → Account → Access → ADB Keys
+    # Run: python -m mlbb_automation setup-adb  (generates the key and prints it)
+    adb_host: str = Field(
+        default="adb.mobfarm.selectel.ru",
+        description=(
+            "ADB relay hostname for Selectel Mobile Farm. "
+            "Connect with: adb connect <adb_host>:<port>"
+        ),
+    )
+    adb_key_path: Path = Field(
+        default=Path("~/.android/adbkey"),
+        description=(
+            "Path to the ADB private key. "
+            "The public key (<key_path>.pub) must be registered in Selectel. "
+            "Generate with: python -m mlbb_automation setup-adb"
+        ),
+    )
+    local_appium_url: str = Field(
+        default="http://localhost:4723",
+        description=(
+            "URL of the local Appium server. "
+            "Appium must be running locally and connected to the device via ADB."
+        ),
+    )
+
     # --- Appium ---
     appium_url: Optional[str] = Field(
         default=None,
-        description="Custom Appium URL. If None, obtained from the farm API.",
+        description=(
+            "Override Appium URL. If None, uses local_appium_url. "
+            "The farm's own Appium URL is not used — Selectel Farm requires "
+            "direct ADB connection with a locally running Appium server."
+        ),
     )
 
     # --- Retry / timeouts ---
@@ -127,7 +159,7 @@ class Settings(BaseSettings):
             raise ValueError(f"log_level must be one of {allowed}, got '{v}'")
         return upper
 
-    @field_validator("log_dir", mode="before")
+    @field_validator("log_dir", "adb_key_path", mode="before")
     @classmethod
     def coerce_path(cls, v: object) -> Path:
         return Path(str(v))

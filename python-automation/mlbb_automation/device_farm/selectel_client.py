@@ -161,14 +161,22 @@ class SelectelFarmClient(DeviceFarmClient):
     Selectel documentation. The token is automatically fetched and refreshed
     using service-user credentials against the Keystone endpoint.
 
+    Devices are connected via ADB over TCP (not via a farm-hosted Appium URL).
+    After reserving a device the caller receives ``ReservedDevice.adb_host``
+    and ``ReservedDevice.adb_port``; ``AppiumExecutor`` uses those to run
+    ``adb connect`` before starting the Appium session.
+
     Args:
-        username:   Selectel service user name.
-        account_id: Selectel numeric account ID.
-        password:   Selectel service user password.
-        base_url:   Base URL of the Mobile Farm API.
-        timeout:    HTTP request timeout in seconds.
-        appium_url_override: If set, overrides the Appium URL from the farm.
-        proxy_url:  Optional HTTP/SOCKS5 proxy URL.
+        username:          Selectel service user name.
+        account_id:        Selectel numeric account ID.
+        password:          Selectel service user password.
+        base_url:          Base URL of the Mobile Farm API.
+        timeout:           HTTP request timeout in seconds.
+        appium_url_override: If set, overrides the Appium URL used for sessions.
+        proxy_url:         Optional HTTP/SOCKS5 proxy URL.
+        adb_host:          Default ADB relay hostname (used when the farm API
+                           response does not include an explicit adbHost field).
+        local_appium_url:  URL of the locally running Appium server.
     """
 
     def __init__(
@@ -180,10 +188,14 @@ class SelectelFarmClient(DeviceFarmClient):
         timeout: int = 30,
         appium_url_override: Optional[str] = None,
         proxy_url: Optional[str] = None,
+        adb_host: str = "adb.mobfarm.selectel.ru",
+        local_appium_url: str = "http://localhost:4723",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._appium_url_override: Optional[str] = appium_url_override
+        self._adb_host: str = adb_host
+        self._local_appium_url: str = local_appium_url
         self._iam = _IamTokenProvider(username, account_id, password)
         self._session: Session = requests.Session()
         self._session.headers.update(
@@ -275,21 +287,41 @@ class SelectelFarmClient(DeviceFarmClient):
         resp = self._post(_ENDPOINT_RENT_START, json=payload)
         data: dict = resp.json()
 
-        # Parse Appium URL and capabilities from the response.
-        # Selectel typically returns something like:
-        #   { "appiumUrl": "https://...", "capabilities": {...}, "sessionId": "..." }
-        # Priority: config override > farm response > URL-based fallback
-        farm_appium_url: str = (
-            data.get("appiumUrl")
-            or data.get("appium_url")
-            or data.get("url")
-            or f"{self._base_url}/wd/hub"  # fallback guess
-        )
-        appium_url: str = self._appium_url_override or farm_appium_url
+        # --- Appium URL ---
+        # Selectel Farm uses ADB over TCP (not a farm-hosted Appium server).
+        # Priority:
+        #   1. Explicit override from config (appium_url / MLBB_APPIUM_URL)
+        #   2. Local Appium URL from config (local_appium_url, default localhost:4723)
+        # The farm-returned appiumUrl is intentionally ignored: it is either absent
+        # or not accessible from outside Russia.
+        appium_url: str = self._appium_url_override or self._local_appium_url
         if self._appium_url_override:
             logger.info(
-                "Using appium_url override from config (ignoring farm response): %s",
-                appium_url,
+                "Using appium_url override from config: %s", appium_url,
+            )
+
+        # --- ADB connection info ---
+        # The farm returns the TCP port for adb connect.
+        # Key names vary across Selectel API versions; try all known names.
+        adb_port_raw: Optional[int] = (
+            data.get("adbPort")
+            or data.get("adb_port")
+            or data.get("port")
+        )
+        adb_port: Optional[int] = int(adb_port_raw) if adb_port_raw else None
+
+        adb_host: Optional[str] = (
+            data.get("adbHost")
+            or data.get("adb_host")
+            or (self._adb_host if adb_port else None)
+        )
+        if adb_host and adb_port:
+            logger.info("ADB endpoint from farm: %s:%s", adb_host, adb_port)
+        else:
+            logger.warning(
+                "Farm response missing ADB port info — "
+                "ADB connect will be skipped. Response keys: %s",
+                list(data.keys()),
             )
 
         raw_caps: dict = data.get("capabilities") or data.get("desiredCapabilities") or {}
@@ -308,6 +340,8 @@ class SelectelFarmClient(DeviceFarmClient):
             appium_url=appium_url,
             capabilities=capabilities,
             session_id=session_id,
+            adb_host=adb_host,
+            adb_port=adb_port,
         )
         logger.info(
             "Device reserved: id=%s, appium_url=%s, session_id=%s",
@@ -450,4 +484,6 @@ def create_client_from_settings(settings) -> SelectelFarmClient:
         timeout=settings.action_timeout_seconds,
         appium_url_override=settings.appium_url,
         proxy_url=settings.proxy_url,
+        adb_host=settings.adb_host,
+        local_appium_url=settings.local_appium_url,
     )

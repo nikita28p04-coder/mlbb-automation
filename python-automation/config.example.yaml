@@ -21,7 +21,31 @@ selectel_api_url: "https://mf.selectel.ru/api/v1"
 # Env: MLBB_PROXY_URL
 proxy_url: null
 
+# ---------------------------------------------------------------------------
+# ADB connection — required for Selectel Mobile Farm
+# ---------------------------------------------------------------------------
+# Selectel devices are accessed via ADB over TCP, not a farm-hosted Appium URL.
+# Docs: https://docs.selectel.ru/mobile-farm/manage/connect-to-device-with-adb/
+#
+# Setup steps:
+#   1. Generate your ADB key pair (once):
+#        python -m mlbb_automation setup-adb
+#   2. Copy the printed QAAAA... public key
+#   3. Add it in Selectel: Control Panel → Account → Access → ADB Keys
+#   4. Run: python -m mlbb_automation check   (verifies key + connectivity)
+#
+# The adb_host below is the Selectel ADB relay — leave as-is.
+# The port is assigned per-device by the farm when you reserve it.
+adb_host: "adb.mobfarm.selectel.ru"
+adb_key_path: "~/.android/adbkey"   # path to ADB private key
+
+# Local Appium server URL (Appium must be running on this machine)
+# Install Appium: npm install -g appium && appium driver install uiautomator2
+local_appium_url: "http://localhost:4723"
+
+# ---------------------------------------------------------------------------
 # Google account credentials (no 2FA required)
+# ---------------------------------------------------------------------------
 google_email: "your-email@gmail.com"
 google_password: "your-password"
 
@@ -36,8 +60,8 @@ device_filter:
   platform_version: "11"   # Android version (e.g. "11", "12", "13")
   device_model: null        # e.g. "Samsung Galaxy S21", or null for any
 
-# Appium settings
-appium_url: null  # Override if farm provides custom Appium URL; null = auto from farm API
+# Appium URL override (optional — leave null to use local_appium_url above)
+appium_url: null
 
 # Retry and timeout settings
 retry_count: 3

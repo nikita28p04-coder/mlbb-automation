@@ -20,6 +20,22 @@ from mlbb_automation.device_farm.selectel_client import SelectelFarmClient
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _make_client(**kwargs) -> SelectelFarmClient:
+    """
+    Create a SelectelFarmClient with mocked IAM auth so tests never make
+    real HTTP calls to cloud.api.selcloud.ru.
+    """
+    client = SelectelFarmClient(
+        username="test-user",
+        account_id="12345",
+        password="test-pass",
+        **kwargs,
+    )
+    client._iam = MagicMock()
+    client._iam.get.return_value = "fake-iam-token-xyz"
+    return client
+
+
 def _mock_response(data: Any, status_code: int = 200) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
@@ -52,7 +68,7 @@ RENT_START_RESPONSE = {
 
 class TestListDevices:
     def _client(self, list_response) -> SelectelFarmClient:
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         client._session = MagicMock()
         client._session.request.return_value = _mock_response(list_response)
         return client
@@ -100,7 +116,7 @@ class TestListDevices:
 
 class TestAcquireDevice:
     def _client(self) -> SelectelFarmClient:
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         session = MagicMock()
         # Return list on GET, rent response on POST
         session.request.side_effect = lambda method, url, **kw: (
@@ -115,21 +131,20 @@ class TestAcquireDevice:
         reserved = client.acquire_device()
         assert isinstance(reserved, ReservedDevice)
         assert reserved.device_info.id == "dev-001"
-        assert reserved.appium_url == "https://farm.example.com/wd/hub"
+        # Selectel uses ADB-based connections: appium_url is the local Appium server,
+        # not the farm-returned appiumUrl (which is ignored by design).
+        assert reserved.appium_url == "http://localhost:4723"
         assert reserved.session_id == "rent-xyz"
 
     def test_acquire_device_raises_if_no_devices(self):
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         client._session = MagicMock()
         client._session.request.return_value = _mock_response([])
         with pytest.raises(RuntimeError, match="No available Android devices"):
             client.acquire_device()
 
     def test_appium_url_override_takes_precedence(self):
-        client = SelectelFarmClient(
-            api_key="test-key",
-            appium_url_override="https://my-custom-appium/wd/hub",
-        )
+        client = _make_client(appium_url_override="https://my-custom-appium/wd/hub")
         session = MagicMock()
         session.request.side_effect = lambda method, url, **kw: (
             _mock_response([DEVICE_RAW]) if method == "GET"
@@ -156,7 +171,7 @@ class TestAcquireDevice:
 
 class TestAcquireDeviceById:
     def _client(self) -> SelectelFarmClient:
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         session = MagicMock()
         session.request.side_effect = lambda method, url, **kw: (
             _mock_response([DEVICE_RAW]) if method == "GET"
@@ -178,7 +193,7 @@ class TestAcquireDeviceById:
 
 class TestReleaseDevice:
     def test_release_calls_rent_stop(self):
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         session = MagicMock()
         session.request.return_value = _mock_response({"status": "ok"})
         client._session = session
@@ -200,7 +215,7 @@ class TestReleaseDevice:
         assert "stop" in str(call_args).lower()
 
     def test_release_does_not_raise_on_http_error(self):
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         session = MagicMock()
         error_resp = _mock_response({"error": "gone"}, status_code=404)
         error_resp.raise_for_status.side_effect = Exception("404")
@@ -231,7 +246,7 @@ class TestHttpRetry:
     """
 
     def _client(self) -> SelectelFarmClient:
-        client = SelectelFarmClient(api_key="test-key")
+        client = _make_client()
         client._session = MagicMock()
         return client
 

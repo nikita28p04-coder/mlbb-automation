@@ -40,6 +40,7 @@ from PIL import Image
 import io
 
 from ..device_farm.base import ReservedDevice
+from ..device_farm.adb_connector import AdbConnector, AdbError
 from ..logging.logger import RunLogger, get_logger
 
 logger = get_logger(__name__)
@@ -79,6 +80,7 @@ class AppiumExecutor:
         action_timeout: int = 30,
         device_id: Optional[str] = None,
         run_logger: Optional[RunLogger] = None,
+        adb_key_path: Optional[str] = None,
     ) -> None:
         self._reserved = reserved
         self._retry_count = retry_count
@@ -86,7 +88,10 @@ class AppiumExecutor:
         self._action_timeout = action_timeout
         self._device_id = device_id or reserved.device_info.id
         self._run_logger = run_logger
+        self._adb_key_path = adb_key_path
         self._driver: Optional[webdriver.Remote] = None
+        self._adb_connector: Optional[AdbConnector] = None
+        self._adb_serial: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Context manager
@@ -101,7 +106,42 @@ class AppiumExecutor:
         return False  # don't suppress exceptions
 
     def start_session(self) -> None:
-        """Create the Appium WebDriver session."""
+        """
+        Connect to the device via ADB (if configured) and start the Appium session.
+
+        When ``ReservedDevice.adb_host`` and ``adb_port`` are set, an ADB TCP
+        connection is established first.  The resulting device serial is injected
+        into the Appium capabilities as ``udid`` so the Appium server targets the
+        correct device.
+        """
+        # ── 1. ADB connect (Selectel Farm requires this before Appium) ─────────
+        if self._reserved.adb_host and self._reserved.adb_port:
+            from pathlib import Path
+            key_path = Path(self._adb_key_path).expanduser() if self._adb_key_path else None
+            self._adb_connector = AdbConnector(key_path=key_path)
+            try:
+                serial = self._adb_connector.connect(
+                    self._reserved.adb_host,
+                    self._reserved.adb_port,
+                )
+                self._adb_serial = serial
+                logger.info("ADB connected: %s", serial)
+                # Inject UDID so Appium targets the ADB-connected device
+                self._reserved.capabilities["udid"] = serial
+            except AdbError as exc:
+                raise RuntimeError(
+                    f"ADB connect to {self._reserved.adb_host}:{self._reserved.adb_port} failed: {exc}. "
+                    "Make sure your ADB public key is registered in the Selectel control panel: "
+                    "Account → Access → ADB Keys.  "
+                    "Run: python -m mlbb_automation setup-adb"
+                ) from exc
+        else:
+            logger.debug(
+                "No ADB host/port in ReservedDevice — skipping adb connect. "
+                "Appium will connect to udid from capabilities (if any)."
+            )
+
+        # ── 2. Appium session ──────────────────────────────────────────────────
         options = UiAutomator2Options()
         for key, value in self._reserved.capabilities.items():
             options.set_capability(key, value)
@@ -110,6 +150,7 @@ class AppiumExecutor:
             "Starting Appium session",
             appium_url=self._reserved.appium_url,
             device_id=self._device_id,
+            adb_serial=self._adb_serial,
         )
         self._driver = webdriver.Remote(
             command_executor=self._reserved.appium_url,
@@ -119,7 +160,7 @@ class AppiumExecutor:
         logger.info("Appium session started", session_id=self._driver.session_id)
 
     def end_session(self) -> None:
-        """Quit the Appium session."""
+        """Quit the Appium session and disconnect from ADB (if connected)."""
         if self._driver:
             try:
                 self._driver.quit()
@@ -128,6 +169,12 @@ class AppiumExecutor:
                 logger.warning("Error ending Appium session", error=str(exc))
             finally:
                 self._driver = None
+
+        # ── ADB disconnect ─────────────────────────────────────────────────────
+        if self._adb_connector and self._adb_serial:
+            self._adb_connector.disconnect(self._adb_serial)
+            self._adb_connector = None
+            self._adb_serial = None
 
     @property
     def driver(self) -> webdriver.Remote:

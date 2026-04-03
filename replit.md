@@ -117,13 +117,15 @@ Standalone Python package (not part of the pnpm monorepo). Automates Mobile Lege
 python-automation/mlbb_automation/
 ├── config/settings.py          # Pydantic v2 config (YAML + MLBB_* env vars)
 ├── device_farm/
-│   ├── base.py                 # Abstract DeviceFarmClient interface
-│   └── selectel_client.py      # Selectel Mobile Farm REST API client
+│   ├── base.py                 # Abstract DeviceFarmClient + ReservedDevice (adb_host, adb_port)
+│   ├── selectel_client.py      # Selectel Mobile Farm REST API client (IAM auth)
+│   └── adb_connector.py        # ADB key gen, adb connect/disconnect (wraps adb binary)
 ├── actions/executor.py         # Appium WebDriver action wrapper (tap, swipe, type, etc.)
+│                               # → runs adb connect before session, disconnect after
 ├── cv/
 │   ├── ocr.py                  # EasyOCR wrapper (OcrEngine, OcrResult)
 │   ├── template_matcher.py     # Multi-scale template matching (TemplateMatcher)
-│   ├── screen_detector.py      # 11-state ScreenDetector (OCR + template signals)
+│   ├── screen_detector.py      # 11-state ScreenDetector (OCR + template signals, RU+EN)
 │   └── state_machine.py        # BFS-based StateMachine for screen navigation
 ├── logging/logger.py           # Structlog JSON logger + RunLogger (artifacts, screenshots)
 ├── recovery/manager.py         # Freeze detection + auto-recovery watchdog
@@ -139,20 +141,31 @@ python-automation/mlbb_automation/
 
 **CLI:**
 ```
+python -m mlbb_automation setup-adb                          # Generate ADB key, print QAAAA... pubkey
+python -m mlbb_automation check --config config.yaml        # Pre-flight: creds + ADB key + devices
 python -m mlbb_automation run --config config.yaml           # Full scenario
 python -m mlbb_automation run --config config.yaml --dry-run # Navigate to payment, skip tap
 python -m mlbb_automation run --config config.yaml --step google_account  # Single step
 python -m mlbb_automation devices --config config.yaml       # List farm devices
 ```
 
+**ADB setup (one-time):**
+1. `python -m mlbb_automation setup-adb` — generates `~/.android/adbkey.pub`
+2. Copy the `QAAAA...` key → Selectel: Control Panel → Account → Access → ADB Keys
+3. `python -m mlbb_automation check` — verify connectivity
+
 **Config file:** `python-automation/config.example.yaml` — copy to `config.yaml` and fill in credentials.
 
 **Artifacts per run:** `run_artifacts/<run_id>/` — `events.jsonl`, `report.json`, `screenshots/`
 
-**Test suite:** 122 tests in `python-automation/tests/` — `python -m pytest tests/ -v`
+**Test suite:** 172+ tests in `python-automation/tests/` — `python -m pytest tests/ -v`
 
 **Key design decisions:**
-- Selectel farm uses Appium (WebDriver) protocol, not raw ADB
+- Selectel farm uses ADB over TCP (not a farm-hosted Appium URL): `adb connect adb.mobfarm.selectel.ru:<port>`
+- ADB public key (QAAAA... format) must be registered in Selectel before connecting
+- AppiumExecutor does `adb connect` before Appium session, `adb disconnect` after
+- Local Appium server (localhost:4723) is used for sessions, not farm-provided URL
+- IAM token auth (X-Auth-Token) from cloud.api.selcloud.ru — 24h TTL, auto-refresh
 - UiAutomator2Options used for Appium 5.x compatibility
 - Abstract `DeviceFarmClient` base allows swapping providers
 - All actions retry 3x with exponential backoff on StaleElement/Timeout
@@ -161,3 +174,4 @@ python -m mlbb_automation devices --config config.yaml       # List farm devices
 - find_element() 4-stage strategy: template → OCR → Appium @text → content-desc
 - Google Pay: probes NATIVE_APP then each WEBVIEW context for the Pay button
 - dry_run mode navigates to payment screen but skips the final Pay tap
+- ScreenDetector: 11 states, EN + RU OCR signals, collision-free spec ordering

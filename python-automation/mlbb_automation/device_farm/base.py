@@ -32,12 +32,17 @@ class ReservedDevice:
     Represents a successfully reserved device.
 
     Contains everything needed to start an Appium session.
+    Selectel Mobile Farm devices are accessed via ADB over TCP:
+        adb connect <adb_host>:<adb_port>
+    The public ADB key must be registered in Selectel before connecting.
     """
 
     device_info: DeviceInfo
     appium_url: str
     capabilities: dict  # Appium desiredCapabilities / options dict
     session_id: Optional[str] = None  # farm-level session/reservation ID
+    adb_host: Optional[str] = None   # e.g. "adb.mobfarm.selectel.ru"
+    adb_port: Optional[int] = None   # TCP port from rent/start response
 
 
 class DeviceFarmClient(ABC):
