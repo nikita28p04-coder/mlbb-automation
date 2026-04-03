@@ -1,0 +1,62 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "Lo6wRQRmH9CcSUjE-BAjw"
+uri = "file://python-automation/run_artifacts/screen_initial.png"
+type = "image"
+title = "Экран Samsung Galaxy A13 (текущее состояние)"
+
+[[outputs]]
+id = "-oEHMFqyJzie7iZZhIzl0"
+uri = "file://python-automation/run_artifacts/run_20260403_182240/screenshots/001_182402_184_settings_accounts.png"
+type = "image"
+title = "Экран настроек аккаунтов"
+
+[[outputs]]
+id = "zdbfFTqtquLpUX1UcEh-k"
+uri = "file://python-automation/run_artifacts/run_20260403_182240/screenshots/002_182759_780_find_element_failed_Add account.png"
+type = "image"
+title = "Экран когда не нашла 'Add account'"
+
+[[outputs]]
+id = "Fn_JYkzHfG3qS5eoQ8xeb"
+uri = "file://python-automation/run_artifacts/run_20260403_183134/screenshots/001_183250_480_settings_accounts.png"
+type = "image"
+title = "Экран аккаунтов в настройках"
+
+[[outputs]]
+id = "eOFWFSHrohL1ecjCwTl73"
+uri = "file://python-automation/run_artifacts/run_20260403_183134/screenshots/006_184047_318_add_account_not_found.png"
+type = "image"
+title = "Экран когда не нашла кнопку"
+
+[[outputs]]
+id = "gerUfhr-mgTcAgtZxPn_i"
+uri = "file://python-automation/run_artifacts/screen_accounts_ui.png"
+type = "image"
+title = "Текущий экран устройства"
+
+[[outputs]]
+id = "boujyPY-_pTwQfUeU7TE0"
+uri = "file://python-automation/run_artifacts/run_20260403_185412/screenshots/010_185830_107_after_email_next.png"
+type = "image"
+title = "После ввода email + Next"
+
+[[outputs]]
+id = "4CzeFThPE9s7Gy-0KoOvx"
+uri = "file://python-automation/run_artifacts/run_20260403_185412/screenshots/011_185946_014_password_screen_timeout.png"
+type = "image"
+title = "Экран при таймауте пароля"
+
+[[outputs]]
+id = "LIlHLVR6ounD7AMF966li"
+uri = "file://python-automation/run_artifacts/run_20260403_191109/screenshots/005_191303_885_intermediate_done.png"
+type = "image"
+title = "Экран intermediate_done"
+
+[[outputs]]
+id = "Nz4V82zFkfag_mOShilmy"
+uri = "file://python-automation/run_artifacts/run_20260403_191109/screenshots/004_191244_913_after_password_next.png"
+type = "image"
+title = "После ввода пароля + Next"

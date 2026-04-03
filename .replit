@@ -17,6 +17,26 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Appium Server"
+
+[[workflows.workflow]]
+name = "Appium Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "ANDROID_HOME=/home/runner/.android-sdk ANDROID_SDK_ROOT=/home/runner/.android-sdk appium --address 127.0.0.1 --port 4723 --log-level info"
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
