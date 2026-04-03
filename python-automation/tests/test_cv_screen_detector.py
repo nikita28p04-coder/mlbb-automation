@@ -161,3 +161,96 @@ class TestScreenDetector:
         detector = _make_detector(ocr_results=[low_conf_result])
         state = detector.detect(_white())
         assert state == ScreenState.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Russian OCR signals
+# ---------------------------------------------------------------------------
+
+class TestRussianOcrSignals:
+    """Each Russian phrase must map to the correct ScreenState."""
+
+    # PAYMENT_SUCCESS
+    def test_ru_payment_success_покупка_выполнена(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Покупка выполнена")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_SUCCESS
+
+    def test_ru_payment_success_оплата_прошла(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Оплата прошла")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_SUCCESS
+
+    def test_ru_payment_success_оплата_успешна(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Оплата успешна")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_SUCCESS
+
+    # PAYMENT_FAILED
+    def test_ru_payment_failed_оплата_отклонена(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Оплата отклонена")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_FAILED
+
+    def test_ru_payment_failed_не_удалось_оплатить(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Не удалось оплатить")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_FAILED
+
+    def test_ru_payment_failed_транзакция_отклонена(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Транзакция отклонена")])
+        assert detector.detect(_white()) == ScreenState.PAYMENT_FAILED
+
+    # MLBB_PAYMENT
+    def test_ru_mlbb_payment_выберите_способ(self):
+        detector = _make_detector(
+            ocr_results=[_ocr_hit("Выберите способ"), _ocr_hit("Оплата")]
+        )
+        assert detector.detect(_white()) == ScreenState.MLBB_PAYMENT
+
+    def test_ru_mlbb_payment_required_only(self):
+        """выберите способ alone is enough (weight=1.0, min_score=1.0)."""
+        detector = _make_detector(ocr_results=[_ocr_hit("выберите способ")])
+        assert detector.detect(_white()) == ScreenState.MLBB_PAYMENT
+
+    # MLBB_SHOP_DIAMONDS
+    def test_ru_shop_diamonds_алмазы_пополнение(self):
+        detector = _make_detector(
+            ocr_results=[_ocr_hit("Алмазы"), _ocr_hit("Пополнение")]
+        )
+        assert detector.detect(_white()) == ScreenState.MLBB_SHOP_DIAMONDS
+
+    def test_ru_shop_diamonds_алмазы_купить(self):
+        detector = _make_detector(
+            ocr_results=[_ocr_hit("Алмазы"), _ocr_hit("Купить")]
+        )
+        assert detector.detect(_white()) == ScreenState.MLBB_SHOP_DIAMONDS
+
+    # MLBB_SHOP
+    def test_ru_shop_магазин_only(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Магазин")])
+        assert detector.detect(_white()) == ScreenState.MLBB_SHOP
+
+    def test_ru_shop_магазин_алмазы(self):
+        detector = _make_detector(
+            ocr_results=[_ocr_hit("Магазин"), _ocr_hit("Алмазы")]
+        )
+        # алмазы alone would match MLBB_SHOP_DIAMONDS — with магазин as required
+        # signal, MLBB_SHOP should win because payment/diamonds specs come first
+        # and require алмазы + bonus; here алмазы alone won't reach min_score 1.5
+        assert detector.detect(_white()) == ScreenState.MLBB_SHOP
+
+    # MLBB_MAIN_MENU
+    def test_ru_main_menu_подготовка_only(self):
+        """подготовка is required and weights 1.0 ≥ min_score 1.0."""
+        detector = _make_detector(ocr_results=[_ocr_hit("Подготовка")])
+        assert detector.detect(_white()) == ScreenState.MLBB_MAIN_MENU
+
+    def test_ru_main_menu_подготовка_герой(self):
+        """«Подготовка» + «Герой» → MLBB_MAIN_MENU.
+        «Магазин» is excluded from the RU MAIN_MENU spec because it also
+        appears in MLBB_SHOP (evaluated first) and would cause false matches."""
+        detector = _make_detector(
+            ocr_results=[_ocr_hit("Подготовка"), _ocr_hit("Герой")]
+        )
+        assert detector.detect(_white()) == ScreenState.MLBB_MAIN_MENU
+
+    # MLBB_LOADING
+    def test_ru_loading_загрузка(self):
+        detector = _make_detector(ocr_results=[_ocr_hit("Загрузка")])
+        assert detector.detect(_white()) == ScreenState.MLBB_LOADING

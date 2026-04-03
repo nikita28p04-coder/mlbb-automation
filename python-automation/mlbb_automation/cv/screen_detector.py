@@ -100,11 +100,32 @@ _STATE_SPECS: List[StateSpec] = [
     StateSpec(ScreenState.PAYMENT_SUCCESS, min_score=1.0, signals=[
         _ocr_signal("purchase complete", confidence=0.5, required=True),
     ]),
+    # RU: payment success
+    StateSpec(ScreenState.PAYMENT_SUCCESS, min_score=1.0, signals=[
+        _ocr_signal("покупка выполнена", confidence=0.5, required=True),
+    ]),
+    StateSpec(ScreenState.PAYMENT_SUCCESS, min_score=1.0, signals=[
+        _ocr_signal("оплата прошла", confidence=0.5, required=True),
+    ]),
+    StateSpec(ScreenState.PAYMENT_SUCCESS, min_score=1.0, signals=[
+        _ocr_signal("оплата успешна", confidence=0.5, required=True),
+    ]),
+
     StateSpec(ScreenState.PAYMENT_FAILED, min_score=1.0, signals=[
         _ocr_signal("payment failed", confidence=0.5, required=True),
     ]),
     StateSpec(ScreenState.PAYMENT_FAILED, min_score=1.0, signals=[
         _ocr_signal("transaction declined", confidence=0.5, required=True),
+    ]),
+    # RU: payment failed
+    StateSpec(ScreenState.PAYMENT_FAILED, min_score=1.0, signals=[
+        _ocr_signal("оплата отклонена", confidence=0.5, required=True),
+    ]),
+    StateSpec(ScreenState.PAYMENT_FAILED, min_score=1.0, signals=[
+        _ocr_signal("не удалось оплатить", confidence=0.5, required=True),
+    ]),
+    StateSpec(ScreenState.PAYMENT_FAILED, min_score=1.0, signals=[
+        _ocr_signal("транзакция отклонена", confidence=0.5, required=True),
     ]),
 
     # --- Google Pay bottom sheet ---
@@ -123,6 +144,11 @@ _STATE_SPECS: List[StateSpec] = [
         _ocr_signal("google pay", confidence=0.5, weight=0.5),
         _ocr_signal("select payment", confidence=0.5, weight=0.5),
     ]),
+    # RU: payment selection
+    StateSpec(ScreenState.MLBB_PAYMENT, min_score=1.0, signals=[
+        _ocr_signal("выберите способ", confidence=0.5, required=True, weight=1.0),
+        _ocr_signal("оплата", confidence=0.5, weight=0.5),
+    ]),
 
     # --- MLBB diamonds shop ---
     StateSpec(ScreenState.MLBB_SHOP_DIAMONDS, min_score=1.5, signals=[
@@ -133,6 +159,15 @@ _STATE_SPECS: List[StateSpec] = [
         _tmpl_signal("buy_button", confidence=0.75, weight=1.0, required=True),
         _ocr_signal("diamonds", confidence=0.5, weight=0.5),
     ]),
+    # RU: diamonds shop
+    StateSpec(ScreenState.MLBB_SHOP_DIAMONDS, min_score=1.5, signals=[
+        _ocr_signal("алмазы", confidence=0.5, required=True, weight=1.0),
+        _ocr_signal("пополнение", confidence=0.5, weight=0.5),
+    ]),
+    StateSpec(ScreenState.MLBB_SHOP_DIAMONDS, min_score=1.5, signals=[
+        _ocr_signal("алмазы", confidence=0.5, required=True, weight=1.0),
+        _ocr_signal("купить", confidence=0.5, weight=0.5),
+    ]),
 
     # --- MLBB general shop ---
     StateSpec(ScreenState.MLBB_SHOP, min_score=1.0, signals=[
@@ -141,6 +176,11 @@ _STATE_SPECS: List[StateSpec] = [
     StateSpec(ScreenState.MLBB_SHOP, min_score=1.0, signals=[
         _ocr_signal("shop", confidence=0.5, required=True, weight=1.0),
         _ocr_signal("diamonds", confidence=0.5, weight=0.5),
+    ]),
+    # RU: general shop
+    StateSpec(ScreenState.MLBB_SHOP, min_score=1.0, signals=[
+        _ocr_signal("магазин", confidence=0.5, required=True, weight=1.0),
+        _ocr_signal("алмазы", confidence=0.5, weight=0.5),
     ]),
 
     # --- MLBB main menu ---
@@ -153,6 +193,13 @@ _STATE_SPECS: List[StateSpec] = [
         _ocr_signal("classic", confidence=0.5, weight=1.0, required=True),
         _ocr_signal("ranked", confidence=0.5, weight=0.5),
     ]),
+    # RU: main menu — «подготовка» alone identifies the main lobby screen.
+    # «магазин» is intentionally excluded: it also appears in MLBB_SHOP which
+    # is evaluated first, so including it here would cause false SHOP matches.
+    StateSpec(ScreenState.MLBB_MAIN_MENU, min_score=1.0, signals=[
+        _ocr_signal("подготовка", confidence=0.5, required=True, weight=1.0),
+        _ocr_signal("герой", confidence=0.5, weight=0.5),
+    ]),
 
     # --- MLBB loading / splash ---
     StateSpec(ScreenState.MLBB_LOADING, min_score=1.0, signals=[
@@ -161,6 +208,10 @@ _STATE_SPECS: List[StateSpec] = [
     StateSpec(ScreenState.MLBB_LOADING, min_score=1.0, signals=[
         _ocr_signal("loading", confidence=0.5, required=True, weight=1.0),
         _ocr_signal("mobile legends", confidence=0.5, weight=0.5),
+    ]),
+    # RU: loading
+    StateSpec(ScreenState.MLBB_LOADING, min_score=1.0, signals=[
+        _ocr_signal("загрузка", confidence=0.5, required=True, weight=1.0),
     ]),
 
     # --- Google 2FA (should not occur per requirements but kept as safety) ---
