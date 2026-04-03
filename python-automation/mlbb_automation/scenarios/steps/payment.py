@@ -147,15 +147,18 @@ def run(
     run_logger: RunLogger,
     device_id: str = "",
     dry_run: bool = False,
+    payment_pin: Optional[str] = None,
 ) -> None:
     """
     Open MLBB Shop → Diamonds → smallest package → Google Pay → confirm.
 
     Args:
-        executor:   Active AppiumExecutor session.
-        run_logger: RunLogger for this automation run.
-        device_id:  Device ID for log context.
-        dry_run:    If True, navigate to payment screen but skip final tap.
+        executor:     Active AppiumExecutor session.
+        run_logger:   RunLogger for this automation run.
+        device_id:    Device ID for log context.
+        dry_run:      If True, navigate to payment screen but skip final tap.
+        payment_pin:  Device unlock PIN for Google Pay authentication.
+                      If None, biometric/PIN prompts are cancelled.
     """
     run_logger.log_step("payment", "started", device_id=device_id, dry_run=dry_run)
     logger.info("payment step starting", device_id=device_id, dry_run=dry_run)
@@ -182,7 +185,7 @@ def run(
 
     # Step 6: Handle device auth (PIN / biometric) if Google Pay requires it
     # This is expected on many devices and must be handled before result detection.
-    _handle_device_auth(executor, run_logger, device_id)
+    _handle_device_auth(executor, run_logger, device_id, payment_pin=payment_pin or "")
 
     # Step 7: Detect result
     # IMPORTANT — at this point payment confirmation has been sent to Google Pay.
@@ -561,6 +564,7 @@ def _handle_device_auth(
     executor: AppiumExecutor,
     run_logger: RunLogger,
     device_id: str,
+    payment_pin: str = "",
 ) -> None:
     """
     Handle device authentication prompts that Google Pay may present after the
@@ -577,16 +581,15 @@ def _handle_device_auth(
       4. If no auth prompt is detected within _AUTH_TIMEOUT, assumes auth was
          not required (or was already handled) and returns silently.
 
-    PIN is read from environment variable ``PAYMENT_PIN``.  If not set,
-    biometric prompts are dismissed via the cancel/fallback path and the flow
-    continues (the device may complete auth automatically in a test environment,
-    or skip auth entirely if the Google account is configured to do so).
+    Args:
+        payment_pin: Device unlock PIN.  Pass an empty string if no PIN is
+                     configured — biometric/PIN prompts will be cancelled and
+                     the flow will continue.
     """
-    import os
     from ...cv.ocr import OcrEngine
 
     ocr = OcrEngine()
-    device_pin = os.environ.get("PAYMENT_PIN", "")
+    device_pin = payment_pin
 
     logger.info("Checking for device auth prompt after Google Pay", device_id=device_id)
     run_logger.log_step("payment", "device_auth_check", device_id=device_id)

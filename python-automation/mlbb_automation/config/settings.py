@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     google_email: str = Field(..., description="Google account email")
     google_password: str = Field(..., description="Google account password")
 
+    # --- Device payment PIN (optional) ---
+    payment_pin: Optional[str] = Field(
+        default=None,
+        description=(
+            "Device unlock PIN for Google Pay authentication. "
+            "Required only if the device shows a PIN prompt after tapping Pay. "
+            "If not set, biometric/PIN prompts are cancelled and the flow continues."
+        ),
+    )
+
     # --- Device preferences ---
     device_filter: DeviceFilter = Field(default_factory=DeviceFilter)
 

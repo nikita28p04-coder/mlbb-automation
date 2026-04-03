@@ -3,6 +3,7 @@ CLI entry point for mlbb_automation.
 
 Usage:
     python -m mlbb_automation --help
+    python -m mlbb_automation check --config config.yaml
     python -m mlbb_automation run --config config.yaml
     python -m mlbb_automation run --config config.yaml --dry-run
     python -m mlbb_automation run --config config.yaml --step google_account
@@ -59,6 +60,131 @@ def devices(config: str, platform_version: Optional[str], model: Optional[str]) 
 
 
 # ---------------------------------------------------------------------------
+# `check` — pre-flight validation of credentials and connectivity
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--config", default="config.yaml", show_default=True, help="Path to config YAML file.")
+def check(config: str) -> None:
+    """
+    Validate configuration and connectivity before a real run.
+
+    Checks:
+      1. Required settings are present (Selectel API key, Google credentials)
+      2. Selectel API is reachable and the key is valid
+      3. At least one Android device is available on the farm
+      4. Template images directory is present
+    """
+    from .device_farm.selectel_client import create_client_from_settings
+    import os
+
+    all_ok = True
+
+    def _row(label: str, ok: bool, detail: str = "") -> None:
+        nonlocal all_ok
+        icon = click.style("✓", fg="green") if ok else click.style("✗", fg="red")
+        line = f"  {icon}  {label}"
+        if detail:
+            line += f"  ({detail})"
+        click.echo(line)
+        if not ok:
+            all_ok = False
+
+    click.echo("\nPre-flight check\n" + "─" * 40)
+
+    # ── 1. Settings ──────────────────────────────────────────────────────────
+    try:
+        settings = load_settings(config)
+        _row("Config file / env vars loaded", True, config)
+    except Exception as exc:
+        _row("Config file / env vars loaded", False, str(exc))
+        click.echo("\n" + click.style("FAILED", fg="red") + " — fix config errors before proceeding.")
+        sys.exit(1)
+
+    _row(
+        "MLBB_SELECTEL_API_KEY set",
+        bool(settings.selectel_api_key),
+        "hidden" if settings.selectel_api_key else "missing",
+    )
+    _row(
+        "MLBB_GOOGLE_EMAIL set",
+        bool(settings.google_email),
+        settings.google_email if settings.google_email else "missing",
+    )
+    _row(
+        "MLBB_GOOGLE_PASSWORD set",
+        bool(settings.google_password),
+        "hidden" if settings.google_password else "missing",
+    )
+    _row(
+        "MLBB_PAYMENT_PIN set (optional)",
+        True,
+        "set" if settings.payment_pin else "not set — PIN/biometric prompts will be cancelled",
+    )
+
+    # ── 2. Selectel API connectivity ─────────────────────────────────────────
+    click.echo()
+    try:
+        client = create_client_from_settings(settings)
+        devices = client.list_devices()
+        _row("Selectel API reachable", True, settings.selectel_api_url)
+        _row(
+            "Available devices on farm",
+            len(devices) > 0,
+            f"{len(devices)} device(s) found" if devices else "no devices available",
+        )
+        if devices:
+            for d in devices[:3]:
+                click.echo(f"       [{d.id}] {d.model} — Android {d.platform_version}")
+            if len(devices) > 3:
+                click.echo(f"       … and {len(devices) - 3} more")
+    except Exception as exc:
+        _row("Selectel API reachable", False, str(exc))
+        _row("Available devices on farm", False, "skipped — API unreachable")
+
+    # ── 3. Template images ───────────────────────────────────────────────────
+    click.echo()
+    templates_dir = os.path.join(
+        os.path.dirname(__file__), "templates"
+    )
+    has_templates = os.path.isdir(templates_dir)
+    if has_templates:
+        pngs = [f for f in os.listdir(templates_dir) if f.endswith(".png")]
+        _row("Templates directory present", True, f"{len(pngs)} PNG file(s)")
+        # Warn about placeholder images (64×32)
+        placeholders = []
+        try:
+            from PIL import Image
+            for fname in pngs:
+                path = os.path.join(templates_dir, fname)
+                img = Image.open(path)
+                if img.size == (64, 32):
+                    placeholders.append(fname)
+        except ImportError:
+            pass
+        if placeholders:
+            click.echo(
+                click.style(
+                    f"\n  ⚠  {len(placeholders)} template(s) are still placeholder images "
+                    "and need real device screenshots:",
+                    fg="yellow",
+                )
+            )
+            for p in placeholders:
+                click.echo(f"       • {p}")
+    else:
+        _row("Templates directory present", False, templates_dir)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    click.echo("\n" + "─" * 40)
+    if all_ok:
+        click.echo(click.style("All checks passed — ready to run.", fg="green"))
+    else:
+        click.echo(click.style("Some checks failed — see above.", fg="red"))
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # `run` — execute the full automation scenario
 # ---------------------------------------------------------------------------
 
@@ -96,6 +222,7 @@ def run(
     from .actions.executor import AppiumExecutor
     from .logging.logger import RunLogger
     from .recovery.manager import RecoveryManager
+    from .scenarios.watchdog import Watchdog
 
     farm_client = create_client_from_settings(settings)
     run_logger = RunLogger(run_id=run_id, log_dir=settings.log_dir, log_level=settings.log_level)
@@ -139,25 +266,29 @@ def run(
             run_logger=run_logger,
         )
         with executor:
+            # RecoveryManager: freeze detection + app relaunch
             recovery = RecoveryManager(
                 executor=executor,
                 app_package="com.mobile.legends",
             )
             recovery.start_watchdog()
 
-            try:
-                _run_scenario(
-                    executor=executor,
-                    run_logger=run_logger,
-                    settings=settings,
-                    step=step,
-                    dry_run=dry_run,
-                    device_id=reserved.device_info.id,
-                    recovery=recovery,
-                )
-                success = True
-            finally:
-                recovery.stop_watchdog()
+            # Watchdog: background thread that auto-dismisses Android popups
+            # and MLBB dialogs (permission requests, update prompts, ad banners)
+            with Watchdog(executor, run_logger=run_logger):
+                try:
+                    _run_scenario(
+                        executor=executor,
+                        run_logger=run_logger,
+                        settings=settings,
+                        step=step,
+                        dry_run=dry_run,
+                        device_id=reserved.device_info.id,
+                        recovery=recovery,
+                    )
+                    success = True
+                finally:
+                    recovery.stop_watchdog()
 
     except Exception as exc:
         logger.error("Run failed", error=str(exc), exc_info=True)
@@ -242,6 +373,7 @@ def _run_scenario(
                 run_logger=run_logger,
                 device_id=device_id,
                 dry_run=dry_run,
+                payment_pin=settings.payment_pin,
             ),
             # Payment step uses the same retry/recovery model as other steps.
             # Retries are safe for UI-navigation failures (Shop navigation,

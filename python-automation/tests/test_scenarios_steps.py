@@ -495,15 +495,13 @@ class TestDeviceAuthHandling:
         # At least 2 screenshots taken (one per clean frame required)
         assert exe.screenshot.call_count >= 2
 
-    def test_delayed_auth_prompt_is_not_missed(self, tmp_path, monkeypatch):
+    def test_delayed_auth_prompt_is_not_missed(self, tmp_path):
         """
         If the first frame is clean but the auth prompt appears on the next frame,
         the function must detect and handle it rather than exiting early.
         """
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.setenv("PAYMENT_PIN", "9999")
-
         # Frame 1: clean; Frame 2: PIN prompt appears; subsequent: after PIN entry
         ocr_frames = iter([
             [_ocr("processing")],     # first clean frame — must NOT exit here
@@ -518,16 +516,15 @@ class TestDeviceAuthHandling:
             mock_time.monotonic.return_value = 0
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="9999")
 
         # PIN entry must have been attempted (find_element called for digits)
         assert exe.tap.call_count >= 4  # 4 digits tapped
 
-    def test_pin_prompt_enters_pin_from_env(self, tmp_path, monkeypatch):
-        """When PIN prompt is detected and PAYMENT_PIN is set, digits are entered."""
+    def test_pin_prompt_enters_pin_from_env(self, tmp_path):
+        """When PIN prompt is detected and payment_pin is set, digits are entered."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.setenv("PAYMENT_PIN", "1234")
 
         # find_element succeeds for each digit button
         exe.find_element.return_value = (100, 200)
@@ -538,16 +535,15 @@ class TestDeviceAuthHandling:
             mock_time.monotonic.return_value = 0
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="1234")
 
         # 4 digit taps + 1 OK tap (at minimum)
         assert exe.tap.call_count >= 4
 
-    def test_pin_prompt_uses_key_press_when_button_not_found(self, tmp_path, monkeypatch):
+    def test_pin_prompt_uses_key_press_when_button_not_found(self, tmp_path):
         """Falls back to press_key when digit button not found by find_element."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.setenv("PAYMENT_PIN", "42")
 
         # find_element raises for digit buttons but succeeds for OK
         call_n = [0]
@@ -564,16 +560,15 @@ class TestDeviceAuthHandling:
             mock_time.monotonic.return_value = 0
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="42")
 
         # press_key called for each digit
         assert exe.press_key.call_count >= 2
 
-    def test_biometric_prompt_falls_back_to_pin(self, tmp_path, monkeypatch):
+    def test_biometric_prompt_falls_back_to_pin(self, tmp_path):
         """Biometric prompt → taps 'Use PIN instead', then enters PIN."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.setenv("PAYMENT_PIN", "0000")
 
         ocr_seq = iter([
             [_ocr("Fingerprint")],          # first iteration — biometric
@@ -588,16 +583,15 @@ class TestDeviceAuthHandling:
             mock_time.monotonic.return_value = 0
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="0000")
 
         # find_element was called (for fallback button + digit buttons)
         assert exe.find_element.call_count >= 1
 
-    def test_no_pin_cancels_biometric_prompt(self, tmp_path, monkeypatch):
-        """When PAYMENT_PIN is not set, biometric prompt is cancelled."""
+    def test_no_pin_cancels_biometric_prompt(self, tmp_path):
+        """When payment_pin is empty, biometric prompt is cancelled."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.delenv("PAYMENT_PIN", raising=False)
 
         exe.find_element.return_value = (100, 200)
 
@@ -607,16 +601,15 @@ class TestDeviceAuthHandling:
             mock_time.monotonic.return_value = 0
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="")
 
         # Should have attempted to tap Cancel or pressed Back
         assert exe.tap.call_count >= 1 or exe.press_back.call_count >= 1
 
-    def test_auth_timeout_logs_and_continues(self, tmp_path, monkeypatch):
+    def test_auth_timeout_logs_and_continues(self, tmp_path):
         """When auth never resolves, times out and continues without error."""
         exe = _make_executor()
         run_logger = _make_run_logger(tmp_path)
-        monkeypatch.delenv("PAYMENT_PIN", raising=False)
 
         with patch("mlbb_automation.cv.ocr.OcrEngine.read_region",
                    return_value=[_ocr("Enter PIN")]), \
@@ -626,7 +619,7 @@ class TestDeviceAuthHandling:
             mock_time.sleep = lambda _: None
             from mlbb_automation.scenarios.steps.payment import _handle_device_auth
             # Should not raise
-            _handle_device_auth(exe, run_logger, "d1")
+            _handle_device_auth(exe, run_logger, "d1", payment_pin="")
 
     def test_enter_pin_calls_ok_to_confirm(self, tmp_path):
         """_enter_pin taps an OK button after entering all digits."""
