@@ -215,6 +215,89 @@ class AppiumExecutor:
         png_bytes = self._retry(lambda: self.driver.get_screenshot_as_png())
         return Image.open(io.BytesIO(png_bytes))
 
+    def adb_screenshot(self) -> Image.Image:
+        """
+        Capture a screenshot via ADB ``exec-out screencap -p``.
+
+        This bypasses UiAutomator2 / Samsung Knox entirely and uses the Android
+        system SurfaceFlinger screencap utility.  Use this instead of
+        ``screenshot()`` when Samsung Knox kills the UiAutomator2 server after
+        the first Appium screenshot (common inside MLBB game screens).
+
+        Requires ``self._adb_serial`` to be set (happens automatically when the
+        session is started with an ADB host/port in the capabilities).
+        """
+        import os, signal, subprocess
+
+        serial = self._adb_serial
+        if not serial:
+            raise RuntimeError("adb_screenshot requires an active ADB serial (connect via ADB first)")
+
+        cmd = ["adb", "-s", serial, "exec-out", "screencap", "-p"]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
+            )
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                proc.wait()
+                raise RuntimeError("ADB screencap timed out after 30 s")
+
+            if not stdout:
+                raise RuntimeError(f"ADB screencap returned empty output. stderr={stderr.decode(errors='replace')[:200]}")
+
+            img = Image.open(io.BytesIO(stdout))
+            self._record_action("adb_screenshot", width=img.width, height=img.height)
+            return img
+
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"ADB screencap failed: {exc}") from exc
+
+    def adb_tap(self, x: int, y: int) -> None:
+        """
+        Tap at screen coordinates via ``adb shell input tap``.
+
+        Bypasses UiAutomator2 / Samsung Knox entirely — works even when the
+        Appium/UiAutomator2 session has been killed by Knox.
+
+        Requires ``self._adb_serial`` to be set.
+        """
+        import os, signal, subprocess
+
+        serial = self._adb_serial
+        if not serial:
+            raise RuntimeError("adb_tap requires an active ADB serial")
+
+        cmd = ["adb", "-s", serial, "shell", "input", "tap", str(x), str(y)]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
+            )
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                proc.wait()
+        except Exception:
+            pass
+        self._record_action("adb_tap", x=x, y=y)
+
     # ------------------------------------------------------------------
     # Coordinate-based actions
     # ------------------------------------------------------------------

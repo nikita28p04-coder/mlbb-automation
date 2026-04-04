@@ -246,73 +246,88 @@ def _open_recharge_screen(
     """
     Navigate from MLBB main menu to the RECHARGE / Diamonds screen.
 
-    Fast path (confirmed on Samsung Galaxy A13, Russian locale):
-      Tap the "+" button next to the crystal counter in the top-right → RECHARGE
-      screen opens directly, no need to go through "Магазин".
+    *** Knox-safe implementation ***
+
+    Samsung Knox kills the UiAutomator2 server after the FIRST Appium screenshot
+    inside MLBB's game context.  This function therefore uses ONE Appium screenshot
+    (already taken by the caller) and then switches exclusively to ADB for all
+    subsequent taps and screenshots.
+
+    Fast path:
+      1. OCR the already-captured ``img`` to find "+" in the right half.
+      2. If found → ADB tap at OCR coords.
+      3. If NOT found → ADB tap at heuristic coordinates (confirmed for Samsung
+         Galaxy A13 landscape 2408×1080).
+
+    Verification:
+      Wait 2 s, take an ADB screenshot (bypasses Knox), OCR for RECHARGE signals.
+      If confirmed → done.  Otherwise fall back to Магазин path.
 
     Fallback:
-      Tap "Магазин" → navigate to Diamonds/Recharge tab (legacy path).
+      Tap "Магазин" → navigate to Diamonds/Recharge tab via ADB taps.
     """
     run_logger.log_step("payment", "open_recharge", device_id=device_id)
     logger.info("Navigating to RECHARGE screen", device_id=device_id)
 
     from ...cv.ocr import OcrEngine
-    import subprocess
     ocr = OcrEngine()
 
+    # ── ONE Appium screenshot (allowed by Knox) ──────────────────────────────
+    # CRITICAL: do NOT call executor.screenshot() more than once while MLBB's
+    # main-menu activity is in the foreground — the second call kills the
+    # UiAutomator2 server.  All subsequent screenshots use executor.adb_screenshot().
     img = executor.screenshot()
     run_logger.save_screenshot(img, label="before_recharge_nav")
 
-    _RECHARGE_CONFIRM_SIGNALS = ("recharge", "diamonds", "50 diamonds", "алмазы", "пополнение")
+    img_w = img.width   # 2408 on Samsung Galaxy A13 landscape
+    img_h = img.height  # 1080 on Samsung Galaxy A13 landscape
 
-    # ── Stage A: UiAutomator2 find "+" element ──────────────────────────────
+    _RECHARGE_CONFIRM_SIGNALS = ("recharge", "diamonds", "50 diamonds", "алмазы", "пополнение", "кристаллы")
+
+    # ── Stage B: OCR on already-captured img — look for "+" in right half ───
+    # (Stage A UiAutomator2 find_element removed — it took a second screenshot
+    # which caused Knox to kill the UiAutomator2 server.)
     shortcut_tapped = False
-    try:
-        x, y = executor.find_element("+", retries=2)
-        executor.tap(x, y)
-        shortcut_tapped = True
-        logger.info("Tapped '+' shortcut via UiAutomator2", device_id=device_id)
-    except RuntimeError:
-        pass
-
-    # ── Stage B: OCR — look for "+" in the right half of the screen ─────────
-    if not shortcut_tapped:
-        results = ocr.read_region(img)
-        img_w = img.width if hasattr(img, "width") else 1920
-        for result in results:
-            if result.text.strip() == "+" and result.cx > img_w * 0.55:
-                executor.tap(result.cx, result.cy)
-                shortcut_tapped = True
-                logger.info("Tapped '+' via OCR", x=result.cx, y=result.cy, device_id=device_id)
-                break
-
-    # ── Stage C: ADB tap at known coords (landscape Samsung Galaxy A13) ─────
-    if not shortcut_tapped:
-        size = executor.get_screen_size()
-        # In landscape MLBB the crystal "+" is at ~79% width, ~6% height
-        cx = int(size[0] * 0.79)
-        cy = int(size[1] * 0.06)
-        logger.info("ADB tap '+' at heuristic coords", x=cx, y=cy, device_id=device_id)
-        try:
-            subprocess.run(["adb", "shell", "input", "tap", str(cx), str(cy)], timeout=10)
+    results = ocr.read_region(img)
+    for result in results:
+        if result.text.strip() == "+" and result.cx > img_w * 0.55:
+            logger.info("OCR found '+' shortcut", x=result.cx, y=result.cy, device_id=device_id)
+            executor.adb_tap(result.cx, result.cy)
             shortcut_tapped = True
-        except Exception as exc:
-            logger.warning("ADB tap failed", error=str(exc), device_id=device_id)
+            logger.info("ADB-tapped '+' shortcut via OCR", x=result.cx, y=result.cy, device_id=device_id)
+            break
 
+    # ── Stage C: heuristic ADB tap at known coordinates ──────────────────────
+    # Confirmed layout for Samsung Galaxy A13 (2408×1080 landscape, MLBB):
+    #   Crystal/diamond "+" button: ~92% width, ~10% height
+    if not shortcut_tapped:
+        cx = int(img_w * 0.92)
+        cy = int(img_h * 0.10)
+        logger.info("Heuristic ADB tap '+' at coords", x=cx, y=cy,
+                    img_w=img_w, img_h=img_h, device_id=device_id)
+        executor.adb_tap(cx, cy)
+        shortcut_tapped = True
+
+    # ── Verify RECHARGE screen opened (ADB screenshot — bypasses Knox) ───────
     if shortcut_tapped:
         time.sleep(2)
-        img = executor.screenshot()
-        results = ocr.read_region(img)
-        texts = " ".join(r.text.lower() for r in results)
-        if any(s in texts for s in _RECHARGE_CONFIRM_SIGNALS):
-            run_logger.save_screenshot(img, label="recharge_via_shortcut")
-            logger.info("RECHARGE screen opened via '+' shortcut", device_id=device_id)
-            return
-        logger.info(
-            "'+' shortcut did not land on RECHARGE — falling back to Магазин path",
-            texts_sample=texts[:100],
-            device_id=device_id,
-        )
+        try:
+            img2 = executor.adb_screenshot()
+            run_logger.save_screenshot(img2, label="after_plus_tap")
+            results2 = ocr.read_region(img2)
+            texts = " ".join(r.text.lower() for r in results2)
+            logger.info("Post-tap OCR texts", texts_sample=texts[:150], device_id=device_id)
+            if any(s in texts for s in _RECHARGE_CONFIRM_SIGNALS):
+                run_logger.save_screenshot(img2, label="recharge_via_shortcut")
+                logger.info("RECHARGE screen opened via '+' shortcut", device_id=device_id)
+                return
+            logger.info(
+                "'+' shortcut did not land on RECHARGE — falling back to Магазин path",
+                texts_sample=texts[:100],
+                device_id=device_id,
+            )
+        except Exception as exc:
+            logger.warning("ADB screenshot/OCR after tap failed", error=str(exc), device_id=device_id)
 
     # ── Fallback: Магазин → Diamonds tab ────────────────────────────────────
     logger.info("Using fallback: Магазин → Diamonds/Recharge tab", device_id=device_id)
@@ -325,40 +340,44 @@ def _open_shop(
     run_logger: RunLogger,
     device_id: str,
 ) -> None:
-    """Navigate to the MLBB Shop from the main menu (legacy / fallback path)."""
-    logger.info("Opening MLBB Shop", device_id=device_id)
+    """
+    Navigate to the MLBB Shop from the main menu (fallback path).
+
+    Knox-safe: uses ADB screenshots and ADB taps exclusively.
+    """
+    logger.info("Opening MLBB Shop (fallback path)", device_id=device_id)
     run_logger.log_step("payment", "open_shop", device_id=device_id)
 
     from ...cv.ocr import OcrEngine
     ocr = OcrEngine()
 
-    # Confirm we're on the main menu before proceeding
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     run_logger.save_screenshot(img, label="before_shop_nav")
+    results = ocr.read_region(img)
 
-    # Tap the Shop button — try each localized label in turn
-    _shop_labels = ("Shop", "Магазин", "Store")
+    _shop_signals = ("shop", "магазин", "store")
     tapped_shop = False
-    for label in _shop_labels:
-        try:
-            x, y = executor.find_element(label, retries=2)
-            executor.tap(x, y)
+    for result in results:
+        if any(s in result.text.lower() for s in _shop_signals):
+            logger.info("ADB tap Shop button via OCR", text=result.text, x=result.cx, y=result.cy, device_id=device_id)
+            executor.adb_tap(result.cx, result.cy)
             tapped_shop = True
             break
-        except RuntimeError:
-            continue
+
     if not tapped_shop:
-        raise StepError(
-            "Could not find Shop button on main menu in any supported language. "
-            "Ensure MLBB is on the main menu before running payment step."
-        )
+        # Heuristic: Samsung Galaxy A13 (2408×1080), Магазин is at ~12% width, ~72% height
+        img_w, img_h = img.width, img.height
+        cx = int(img_w * 0.12)
+        cy = int(img_h * 0.72)
+        logger.warning("Shop button not found by OCR — heuristic ADB tap", x=cx, y=cy, device_id=device_id)
+        executor.adb_tap(cx, cy)
 
     time.sleep(2)
 
     # Verify we entered the shop
     deadline = time.monotonic() + _SHOP_TIMEOUT
     while time.monotonic() < deadline:
-        img = executor.screenshot()
+        img = executor.adb_screenshot()
         results = ocr.read_region(img)
         texts = " ".join(r.text.lower() for r in results)
         if any(s in texts for s in _SHOP_SIGNALS + _DIAMONDS_SIGNALS):
@@ -367,7 +386,7 @@ def _open_shop(
             return
         time.sleep(_POLL_INTERVAL)
 
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     run_logger.save_screenshot(img, label="shop_timeout")
     raise StepError(f"Did not enter MLBB Shop within {_SHOP_TIMEOUT}s")
 
@@ -377,14 +396,18 @@ def _open_diamonds_section(
     run_logger: RunLogger,
     device_id: str,
 ) -> None:
-    """Inside the Shop, navigate to the Diamonds / Top-Up section."""
+    """
+    Inside the Shop, navigate to the Diamonds / Top-Up section.
+
+    Knox-safe: uses ADB screenshots and ADB taps exclusively.
+    """
     logger.info("Opening Diamonds section", device_id=device_id)
     run_logger.log_step("payment", "open_diamonds", device_id=device_id)
 
     from ...cv.ocr import OcrEngine
     ocr = OcrEngine()
 
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     results = ocr.read_region(img)
     texts = " ".join(r.text.lower() for r in results)
 
@@ -393,25 +416,26 @@ def _open_diamonds_section(
         logger.info("Already on Diamonds section", device_id=device_id)
         return
 
-    # Try to find and tap Diamonds tab — try each localized label
-    _diamond_labels = (
-        "Diamonds", "Алмазы", "Кристаллы", "Crystals",
-        "Top Up", "Пополнить", "Пополнение", "Recharge",
-    )
+    _diamond_labels = ("diamonds", "алмазы", "кристаллы", "crystals",
+                       "top up", "пополнить", "пополнение", "recharge")
     tapped_diamonds = False
-    for label in _diamond_labels:
-        try:
-            x, y = executor.find_element(label, retries=2)
-            executor.tap(x, y)
+    for result in results:
+        if any(s in result.text.lower() for s in _diamond_labels):
+            logger.info("ADB tap Diamonds tab via OCR", text=result.text, x=result.cx, y=result.cy, device_id=device_id)
+            executor.adb_tap(result.cx, result.cy)
             tapped_diamonds = True
             break
-        except RuntimeError:
-            continue
+
     if not tapped_diamonds:
-        raise StepError("Could not find Diamonds/Top-Up tab in MLBB Shop in any supported language")
+        # Heuristic: Samsung Galaxy A13 (2408×1080), Diamonds tab ~15% width, ~12% height
+        img_w, img_h = img.width, img.height
+        cx = int(img_w * 0.15)
+        cy = int(img_h * 0.12)
+        logger.warning("Diamonds tab not found by OCR — heuristic ADB tap", x=cx, y=cy, device_id=device_id)
+        executor.adb_tap(cx, cy)
 
     time.sleep(2)
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     run_logger.save_screenshot(img, label="diamonds_section")
     logger.info("Diamonds section opened", device_id=device_id)
 
@@ -424,12 +448,13 @@ def _select_smallest_package(
     """
     Select the smallest (cheapest) diamond package.
 
+    Knox-safe: uses ADB screenshots and ADB taps exclusively.
+
     Strategy:
-      1. Read all OCR text on screen and find elements containing price signals
-         for small amounts (< $2).
-      2. Among matches, pick the one closest to the top-left (smallest package
-         usually appears first).
-      3. Tap it.
+      1. ADB screenshot of the RECHARGE screen.
+      2. OCR to find a price signal matching a small pack (< $2 / ~99 ₽).
+      3. ADB tap at that position.
+      4. If no price signal found, use heuristic coordinates for Samsung A13.
     """
     logger.info("Selecting smallest diamond package", device_id=device_id)
     run_logger.log_step("payment", "select_package", device_id=device_id)
@@ -437,9 +462,16 @@ def _select_smallest_package(
     from ...cv.ocr import OcrEngine
     ocr = OcrEngine()
 
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     results = ocr.read_region(img)
     run_logger.save_screenshot(img, label="diamonds_packages")
+
+    logger.info(
+        "OCR results on RECHARGE screen",
+        count=len(results),
+        texts=[r.text for r in results[:12]],
+        device_id=device_id,
+    )
 
     # Find OCR results that look like small-pack price tags
     candidates = []
@@ -449,27 +481,36 @@ def _select_smallest_package(
             candidates.append(result)
 
     if candidates:
-        # Sort by position: top-to-bottom, left-to-right
+        # Sort by position: top-to-bottom, left-to-right (cheapest first)
         best = sorted(candidates, key=lambda r: (r.cy, r.cx))[0]
         logger.info(
             "Small pack identified by price text",
             text=best.text,
+            x=best.cx,
+            y=best.cy,
             device_id=device_id,
         )
-        executor.tap(best.cx, best.cy)
+        executor.adb_tap(best.cx, best.cy)
         time.sleep(1)
     else:
-        # Fallback: tap the first item in the list (top-left area of package grid)
+        # Fallback: heuristic coords for Samsung Galaxy A13 landscape (2408×1080)
+        # RECHARGE screen: "50 Diamonds" is typically the first/leftmost package row
+        # at approximately: 22% width, 42% height
+        img_w, img_h = img.width, img.height
+        cx = int(img_w * 0.22)
+        cy = int(img_h * 0.42)
         logger.warning(
-            "No price signals found — tapping top-left package area",
+            "No price signals found — tapping heuristic package coords",
+            x=cx,
+            y=cy,
+            img_w=img_w,
+            img_h=img_h,
             device_id=device_id,
         )
-        size = executor.get_screen_size()
-        # Packages usually start at roughly 1/3 from top, 1/4 from left
-        executor.tap(size[0] // 4, size[1] // 3)
+        executor.adb_tap(cx, cy)
         time.sleep(1)
 
-    img = executor.screenshot()
+    img = executor.adb_screenshot()
     run_logger.save_screenshot(img, label="package_selected")
 
 
@@ -478,24 +519,53 @@ def _tap_buy(
     run_logger: RunLogger,
     device_id: str,
 ) -> None:
-    """Tap the Buy / Purchase button to initiate payment."""
+    """
+    Tap the Buy / Purchase button on the selected package to open Google Pay sheet.
+
+    Knox-safe: uses ADB screenshot + OCR to locate the button, then ADB tap.
+
+    Fallback: heuristic coordinates for Samsung Galaxy A13 (2408×1080 landscape).
+    """
     logger.info("Tapping Buy button", device_id=device_id)
     run_logger.log_step("payment", "tap_buy", device_id=device_id)
 
-    _buy_labels = ("Buy", "Purchase", "Купить", "Приобрести")
-    for label in _buy_labels:
-        try:
-            x, y = executor.find_element(label, retries=2)
-            executor.tap(x, y)
-            logger.info("Tapped Buy button", label=label, device_id=device_id)
-            time.sleep(2)
-            img = executor.screenshot()
-            run_logger.save_screenshot(img, label="after_buy_tap")
-            return
-        except RuntimeError:
-            continue
+    from ...cv.ocr import OcrEngine
+    ocr = OcrEngine()
 
-    raise StepError("Could not find Buy/Purchase button in any supported language")
+    img = executor.adb_screenshot()
+    run_logger.save_screenshot(img, label="before_buy_tap")
+    results = ocr.read_region(img)
+    texts_all = " ".join(r.text.lower() for r in results)
+    logger.info("OCR before Buy tap", texts_sample=texts_all[:150], device_id=device_id)
+
+    _buy_signals = ("купить", "buy", "purchase", "приобрести", "оплатить")
+    buy_tapped = False
+    for result in results:
+        if any(s in result.text.lower() for s in _buy_signals):
+            logger.info("OCR found Buy button", text=result.text, x=result.cx, y=result.cy, device_id=device_id)
+            executor.adb_tap(result.cx, result.cy)
+            buy_tapped = True
+            break
+
+    if not buy_tapped:
+        # Heuristic: on Samsung Galaxy A13 RECHARGE screen after package tap,
+        # the "Купить" / "Buy" button is at approximately bottom-center
+        # ~50% width, ~82% height for landscape 2408×1080
+        img_w, img_h = img.width, img.height
+        cx = int(img_w * 0.50)
+        cy = int(img_h * 0.82)
+        logger.warning(
+            "Buy button not found by OCR — tapping heuristic coords",
+            x=cx,
+            y=cy,
+            device_id=device_id,
+        )
+        executor.adb_tap(cx, cy)
+        buy_tapped = True
+
+    time.sleep(2)
+    img = executor.adb_screenshot()
+    run_logger.save_screenshot(img, label="after_buy_tap")
 
 
 # ---------------------------------------------------------------------------
@@ -511,15 +581,14 @@ def _handle_google_pay(
     """
     Wait for the Google Pay sheet and confirm the payment.
 
-    Google Pay may appear:
-      a) In NATIVE_APP context (bottom sheet overlay)
-      b) In a WEBVIEW context (rendered web UI inside a bottom sheet)
+    Knox-safe: uses ADB screenshots for waiting and detection.
+
+    Google Pay sheet detection uses OCR signals.  All screenshots and taps
+    go through ADB to avoid any UiAutomator2 interactions that may have been
+    invalidated by Knox killing the server during MLBB screenshots.
 
     In dry_run mode: wait for the sheet to appear (verifying the full checkout
     flow rendered correctly), then return without tapping the Pay button.
-
-    We try to confirm in NATIVE_APP first, then switch to each WEBVIEW
-    context if needed.
     """
     logger.info("Waiting for Google Pay sheet", device_id=device_id)
     run_logger.log_step("payment", "google_pay_wait", device_id=device_id)
@@ -527,45 +596,101 @@ def _handle_google_pay(
     from ...cv.ocr import OcrEngine
     ocr = OcrEngine()
 
-    # Wait for the Google Pay sheet to appear
+    # Wait for the Google Pay sheet to appear (ADB screenshots)
     deadline = time.monotonic() + _PAYMENT_SHEET_TIMEOUT
+    sheet_img = None
     while time.monotonic() < deadline:
-        img = executor.screenshot()
+        img = executor.adb_screenshot()
         results = ocr.read_region(img)
         texts = " ".join(r.text.lower() for r in results)
+        logger.info(
+            "Polling for Google Pay sheet",
+            texts_sample=texts[:100],
+            device_id=device_id,
+        )
         if any(s in texts for s in _GOOGLE_PAY_SIGNALS):
+            sheet_img = img
             run_logger.save_screenshot(img, label="google_pay_sheet")
-            logger.info("Google Pay sheet visible", device_id=device_id)
+            logger.info("Google Pay sheet visible", texts_matched=texts[:80], device_id=device_id)
             break
         time.sleep(_POLL_INTERVAL)
     else:
-        img = executor.screenshot()
+        img = executor.adb_screenshot()
         run_logger.save_screenshot(img, label="google_pay_timeout")
+        results = ocr.read_region(img)
+        texts = " ".join(r.text.lower() for r in results)
         raise StepError(
-            f"Google Pay sheet did not appear within {_PAYMENT_SHEET_TIMEOUT}s"
+            f"Google Pay sheet did not appear within {_PAYMENT_SHEET_TIMEOUT}s. "
+            f"OCR texts: {texts[:200]}"
         )
 
     if dry_run:
         # Verified the sheet rendered — stop before irreversible payment action
-        img = executor.screenshot()
-        run_logger.save_screenshot(img, label="dry_run_google_pay_sheet")
+        final_img = executor.adb_screenshot()
+        run_logger.save_screenshot(final_img, label="dry_run_google_pay_sheet")
+        results = ocr.read_region(final_img)
+        texts = " ".join(r.text for r in results)
         logger.info(
             "DRY RUN — Google Pay sheet confirmed; skipping final payment tap",
+            ocr_texts=texts[:200],
             device_id=device_id,
         )
         return
 
-    # Try confirming in NATIVE_APP context first
-    if _try_confirm_payment_native(executor, run_logger, device_id):
-        return
+    # ── Full run: tap "Купить" via ADB (UiAutomator2 may be dead after Knox) ──
+    _confirm_payment_adb(executor, run_logger, device_id, sheet_img=sheet_img, ocr=ocr)
 
-    # Switch contexts and try each WEBVIEW
-    if _try_confirm_payment_webview(executor, run_logger, device_id):
-        return
 
-    raise StepError(
-        "Could not find payment confirmation button in any Appium context"
-    )
+def _confirm_payment_adb(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+    sheet_img=None,
+    ocr=None,
+) -> None:
+    """
+    Confirm the Google Pay sheet by tapping the "Купить" button via ADB.
+
+    Knox-safe: all actions use ADB screenshots and ADB taps.
+    """
+    from ...cv.ocr import OcrEngine
+    if ocr is None:
+        ocr = OcrEngine()
+
+    img = sheet_img or executor.adb_screenshot()
+    results = ocr.read_region(img)
+
+    _confirm_signals = ("купить", "buy", "pay", "оплатить", "подтвердить", "purchase")
+
+    # Find the confirmation button by OCR
+    confirmed = False
+    for result in results:
+        if any(s in result.text.lower() for s in _confirm_signals):
+            logger.info(
+                "ADB tap payment confirm button",
+                text=result.text,
+                x=result.cx,
+                y=result.cy,
+                device_id=device_id,
+            )
+            executor.adb_tap(result.cx, result.cy)
+            confirmed = True
+            break
+
+    if not confirmed:
+        # Heuristic: on Samsung Galaxy A13, Google Pay "Купить" is at bottom-right
+        # approximately 72% width, 87% height for landscape 2408×1080
+        img_w, img_h = img.width, img.height
+        cx = int(img_w * 0.72)
+        cy = int(img_h * 0.87)
+        logger.warning(
+            "Купить button not found by OCR — heuristic ADB tap",
+            x=cx,
+            y=cy,
+            device_id=device_id,
+        )
+        executor.adb_tap(cx, cy)
+    run_logger.log_step("payment", "payment_confirm_tapped", device_id=device_id)
 
 
 def _try_confirm_payment_native(

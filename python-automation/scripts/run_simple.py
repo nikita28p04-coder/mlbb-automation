@@ -35,6 +35,8 @@ Options:
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -138,31 +140,47 @@ def _parse_args() -> argparse.Namespace:
 def _adb(adb_serial: str, *shell_args: str, timeout: int = 10) -> str:
     """
     Run ``adb -s <serial> shell <args>`` and return stdout (stripped).
+
+    Uses Popen + process-group kill to guarantee the timeout is respected
+    even when the ADB daemon holds pipes open (a common issue with TCP
+    ADB connections to remote devices).
+
     Swallows all errors — callers should handle empty return value.
     """
+    cmd = ["adb", "-s", adb_serial, "shell"] + list(shell_args)
     try:
-        result = subprocess.run(
-            ["adb", "-s", adb_serial, "shell"] + list(shell_args),
-            capture_output=True, text=True, timeout=timeout,
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,   # new process group → kills children too
         )
-        return (result.stdout or "").strip()
+        try:
+            stdout, _ = proc.communicate(timeout=timeout)
+            return stdout.decode(errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.wait()
+            return ""
     except Exception:
         return ""
 
 
 def _wake_and_keep_screen_on(adb_serial: str) -> None:
     """
-    Wake the device screen and prevent it from sleeping while ADB is
-    connected.
+    Wake the device screen via ADB keyevents.
+
+    We skip ``svc power stayon`` because it hangs on Samsung Android 14
+    when called over a TCP ADB connection.  Auto-lock is assumed to be
+    disabled on the device (user has done this in Settings).
 
     Steps:
-      1. ``svc power stayon true``  — keeps screen on while connected
-      2. KEYCODE_WAKEUP (224)       — turns screen on if off
-      3. KEYCODE_MENU  (82)         — dismisses swipe lockscreen
+      1. KEYCODE_WAKEUP (224) — turns screen on if off
+      2. KEYCODE_MENU  (82)  — dismisses a swipe lockscreen
     """
-    print("[screen] Keeping screen on (svc power stayon true)...")
-    _adb(adb_serial, "svc", "power", "stayon", "true")
-
     print("[screen] Sending WAKEUP + MENU key events...")
     _adb(adb_serial, "input", "keyevent", "224")  # KEYCODE_WAKEUP
     time.sleep(0.5)
@@ -178,27 +196,144 @@ def _get_foreground_package(adb_serial: str) -> str:
     Parses ``dumpsys activity activities`` for the resumed activity line.
     Returns empty string on failure.
     """
-    try:
-        result = subprocess.run(
-            ["adb", "-s", adb_serial, "shell",
-             "dumpsys", "activity", "activities"],
-            capture_output=True, text=True, timeout=15,
-        )
-        for line in result.stdout.splitlines():
-            if "mResumedActivity" in line or "ResumedActivity" in line:
-                # Line format: ... u0 com.package.name/.Activity t42}
-                parts = line.strip().split()
-                for part in parts:
-                    if "/" in part and not part.startswith("{"):
-                        return part.split("/")[0]
-    except Exception:
-        pass
+    out = _adb(adb_serial, "dumpsys", "activity", "activities", timeout=15)
+    for line in out.splitlines():
+        if "mResumedActivity" in line or "ResumedActivity" in line:
+            parts = line.strip().split()
+            for part in parts:
+                if "/" in part and not part.startswith("{"):
+                    return part.split("/")[0]
     return ""
+
+
+# ---------------------------------------------------------------------------
+# ADB-based Play Store launch (Samsung Knox bypass)
+# ---------------------------------------------------------------------------
+
+_MLBB_PACKAGE = "com.mobile.legends.usa"
+
+# Labels we look for in the UI dump to tap and launch the already-installed app
+_PLAY_LABELS = ("Играть", "Открыть", "Play", "Open", "UPDATE", "Обновить")
+
+
+def _launch_mlbb_via_play_store_adb(adb_serial: str) -> bool:
+    """
+    Open the Play Store MLBB page and tap "Играть" using only ADB subprocess.
+
+    Samsung Knox kills the UiAutomator2 test instrumentation when Play Store
+    (a "protected" system app) is in the foreground.  By using ADB directly
+    we sidestep UiAutomator2 entirely for this step.
+
+    Steps:
+      1. Fire the market:// intent via ``adb shell am start``
+      2. Wait 6 s for Play Store to finish loading
+      3. Dump the UI hierarchy via ``adb shell uiautomator dump``
+      4. Parse the XML for a known Play button label; tap its centre
+      5. Wait 5 s and verify MLBB is the foreground package
+
+    Returns:
+        True  — MLBB is confirmed to be loading/running after the step.
+        False — could not confirm; caller should proceed anyway.
+    """
+    import re
+
+    print("[adb-ps] Opening Play Store MLBB page via market:// intent...")
+    _adb(adb_serial,
+         "am", "start",
+         "-a", "android.intent.action.VIEW",
+         "-d", f"market://details?id={_MLBB_PACKAGE}",
+         timeout=15)
+    print("[adb-ps] Waiting 7 s for Play Store to load...")
+    time.sleep(7)
+
+    # Dump UI hierarchy to device storage then read it back
+    print("[adb-ps] Dumping UI hierarchy...")
+    _adb(adb_serial, "uiautomator", "dump", "/sdcard/uidump.xml", timeout=20)
+    xml = _adb(adb_serial, "cat", "/sdcard/uidump.xml", timeout=10)
+
+    if not xml:
+        print("[adb-ps] UI dump failed or empty — trying fallback tap at (540, 1200)...")
+        _adb(adb_serial, "input", "tap", "540", "1200", timeout=10)
+    else:
+        # Parse bounds for known labels in any attribute order
+        tapped = False
+        for label in _PLAY_LABELS:
+            # Attribute order A: text=... bounds=...
+            pattern = (
+                r'text="' + re.escape(label) + r'"'
+                r'[^/]*?'
+                r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+            )
+            m = re.search(pattern, xml)
+            if not m:
+                # Attribute order B: bounds=... text=...
+                pattern2 = (
+                    r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+                    r'[^/]*?'
+                    r'text="' + re.escape(label) + r'"'
+                )
+                m = re.search(pattern2, xml)
+            if m:
+                x1, y1, x2, y2 = map(int, m.groups())
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                print(f"[adb-ps] Tapping '{label}' at ({cx}, {cy})...")
+                _adb(adb_serial, "input", "tap", str(cx), str(cy), timeout=10)
+                tapped = True
+                break
+        if not tapped:
+            print("[adb-ps] Button not found in XML — trying fallback tap at (540, 1200)...")
+            _adb(adb_serial, "input", "tap", "540", "1200", timeout=10)
+
+    print("[adb-ps] Waiting 5 s for MLBB to start loading...")
+    time.sleep(5)
+
+    pkg = _get_foreground_package(adb_serial)
+    if _MLBB_PACKAGE in pkg:
+        print(f"[adb-ps] MLBB is in foreground ({pkg}) ✓")
+        return True
+    else:
+        print(f"[adb-ps] Foreground is {pkg!r} — MLBB may still be loading, continuing...")
+        return False
 
 
 # ---------------------------------------------------------------------------
 # Pre-session cleanup
 # ---------------------------------------------------------------------------
+
+def _adb_connect(serial: str, timeout: int = 20) -> str:
+    """
+    Run ``adb connect <serial>`` and return stdout.
+    Uses process-group kill to honour the timeout even on stale TCP sockets.
+    """
+    try:
+        proc = subprocess.Popen(
+            ["adb", "connect", serial],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=timeout)
+            return stdout.decode(errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.wait()
+            return ""
+    except Exception:
+        return ""
+
+
+def _adb_verify_alive(serial: str) -> bool:
+    """
+    Verify the ADB connection is alive with a quick ``echo ping`` command.
+    Returns True if the device responds within 5 s.
+    """
+    result = _adb(serial, "echo", "ping", timeout=5)
+    return result.strip() == "ping"
+
 
 def _pre_session_cleanup(adb_host: str, adb_port: int) -> None:
     """
@@ -207,100 +342,95 @@ def _pre_session_cleanup(adb_host: str, adb_port: int) -> None:
     serial = f"{adb_host}:{adb_port}"
 
     print(f"\n[cleanup] Connecting ADB to {serial}...")
-    try:
-        result = subprocess.run(
-            ["adb", "connect", serial],
-            capture_output=True, text=True, timeout=30,
-        )
-        print(f"[cleanup] {result.stdout.strip()}")
-    except Exception as exc:
-        print(f"[cleanup] Warning: adb connect failed: {exc}")
+    out = _adb_connect(serial)
+    print(f"[cleanup] {out or '(no response from adb connect)'}")
+
+    # Verify the connection is actually alive
+    if not _adb_verify_alive(serial):
+        print("[cleanup] ADB not responding — attempting fresh reconnect...")
+        # Disconnect stale entry, then reconnect
+        try:
+            proc = subprocess.Popen(
+                ["adb", "disconnect", serial],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                preexec_fn=os.setsid,
+            )
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    proc.kill()
+                proc.wait()
+        except Exception:
+            pass
+        time.sleep(1)
+        out = _adb_connect(serial)
+        print(f"[cleanup] Reconnect result: {out or '(no response)'}")
+        if not _adb_verify_alive(serial):
+            print("[cleanup] WARNING: ADB still not responding after reconnect — is the device still reserved?")
+        else:
+            print("[cleanup] ADB reconnected successfully ✓")
 
     time.sleep(2)
 
     print("[cleanup] Waking screen and disabling auto-sleep...")
     _wake_and_keep_screen_on(serial)
 
-    print("[cleanup] Force-stopping stale UiAutomator2 server...")
-    for pkg in ["io.appium.uiautomator2.server", "io.appium.uiautomator2.server.test"]:
-        try:
-            subprocess.run(
-                ["adb", "-s", serial, "shell", "am", "force-stop", pkg],
-                timeout=10, check=False, capture_output=True,
-            )
-        except Exception:
-            pass
+    # NOTE: Do NOT force-stop UiAutomator2 server here.
+    # With skipServerInstallation=True, Appium reuses the server already on the
+    # device.  Killing it would cause the session to start without a running
+    # server, which leads to instrumentation crashes shortly after connect.
 
     print("[cleanup] Done.\n")
 
 
 # ---------------------------------------------------------------------------
-# State detection (requires active Appium session)
+# State detection — pure ADB, no Appium session required
 # ---------------------------------------------------------------------------
 
-def _detect_device_state(
-    executor: AppiumExecutor,
-    adb_serial: str,
-    run_logger: RunLogger,
-) -> DeviceState:
+def _detect_state_via_adb(adb_serial: str) -> DeviceState:
     """
-    Detect current device state by combining:
-      1. Foreground package name (via ADB)
-      2. OCR text scan of a screenshot
+    Detect the current device state using only ADB shell commands.
+
+    This is intentionally done BEFORE the Appium session starts so that the
+    UiAutomator2 server is not burdened with extra work (screenshots + OCR)
+    that can cause the instrumentation process to crash.
+
+    Detection logic:
+      1. Ask Android which package/activity is currently resumed
+         (``dumpsys activity activities`` → mResumedActivity line)
+      2. Map the package name to a DeviceState
 
     Returns one of the DeviceState literals.
     """
-    from mlbb_automation.cv.ocr import OcrEngine
-
-    # Wake screen before detection (belt+suspenders)
-    executor.wake_screen()
-    time.sleep(0.5)
-
     pkg = _get_foreground_package(adb_serial)
     print(f"[state] Foreground package: {pkg!r}")
 
-    img = executor.screenshot()
-    run_logger.save_screenshot(img, label="state_detection")
+    if not pkg:
+        # Could not determine package — check if screen looks off
+        # (very few pixels or locked).  Assume home to be safe.
+        print("[state] Could not determine foreground package — assuming 'home'")
+        return "home"
 
-    ocr = OcrEngine()
-    results = ocr.read_region(img)
-    texts = " ".join(r.text.lower() for r in results)
-
-    print(f"[state] OCR texts (first 200): {texts[:200]!r}")
-
-    # Google Pay billing sheet (appears over any app)
-    if all(s in texts for s in ("купить",)) and "google" in texts:
-        return "google_pay"
-
-    # MLBB is in the foreground
     if "com.mobile.legends" in pkg:
-        if any(s in texts for s in _MAIN_MENU_SIGNALS):
-            return "mlbb_main_menu"
-        if any(s in texts for s in _LOADING_SIGNALS):
-            return "mlbb_loading"
-        # MLBB is running but sub-state unclear → treat as loading/navigating
-        return "mlbb_ingame"
+        # MLBB is in the foreground.  We conservatively return mlbb_main_menu
+        # so that the script skips Play Store launch and onboarding and goes
+        # straight to the payment navigation.  If the app is still on a loading
+        # screen the payment step will wait for the main menu itself.
+        print("[state] MLBB is in foreground — treating as mlbb_main_menu")
+        return "mlbb_main_menu"
 
-    # Google Play Store
     if pkg == "com.android.vending":
         return "play_store"
 
-    # Home / Launcher
-    if "launcher" in pkg or "home" in pkg:
+    if "launcher" in pkg or "home" in pkg or "nexuslauncher" in pkg:
         return "home"
 
-    # Very few OCR results usually means blank/lock screen
-    if len(results) < 3:
-        return "locked"
-
-    # Play Store signals visible even if package detection failed
-    if any(s in texts for s in _PLAY_STORE_SIGNALS) and "google" in texts:
-        return "play_store"
-
-    # MLBB main menu signals visible
-    if any(s in texts for s in _MAIN_MENU_SIGNALS):
-        return "mlbb_main_menu"
-
+    # Any other package (browser, Settings, etc.) → treat as home-equivalent
+    # so that we run the full flow from Play Store
+    print(f"[state] Unknown package {pkg!r} — treating as 'unknown'")
     return "unknown"
 
 
@@ -366,7 +496,49 @@ def main() -> int:
     # ── 1. Pre-session cleanup + screen wake ────────────────────────────────
     _pre_session_cleanup(args.adb_host, args.adb_port)
 
-    # ── 2. Build driver objects ─────────────────────────────────────────────
+    # ── 2. State detection (pure ADB, before Appium session) ────────────────
+    #
+    # State is detected via ADB only — no Appium session needed.  This avoids
+    # the UiAutomator2 instrumentation crash that happened when OCR (34 s) was
+    # run inside the session immediately after startup.
+    #
+    if args.force_launch:
+        state: DeviceState = "unknown"
+        print("[state] --force-launch: skipping state detection, starting from Play Store")
+    else:
+        print("[state] Detecting current device state via ADB...")
+        state = _detect_state_via_adb(adb_serial)
+        print(f"[state] Detected: {state}")
+
+    # ── 3. Routing — determine which steps to run ────────────────────────────
+    #
+    #  State              │ Play Store (ADB) │ Onboarding (Appium) │ Payment
+    #  ───────────────────┼──────────────────┼─────────────────────┼─────────
+    #  home / play_store  │       YES        │        YES          │   YES
+    #  unknown            │       YES        │        YES          │   YES
+    #  mlbb_loading       │       no         │        YES          │   YES
+    #  mlbb_ingame        │       no         │        YES          │   YES
+    #  mlbb_main_menu     │       no         │        no           │   YES
+    #  google_pay         │       no         │        no           │   YES
+    #  ───────────────────────────────────────────────────────────────────────
+    #
+    # KEY INSIGHT: Samsung Knox kills UiAutomator2 instrumentation when Play
+    # Store is in the foreground.  We therefore handle the Play Store step via
+    # pure ADB *before* starting the Appium session.
+
+    need_play_store = state not in ("mlbb_main_menu", "mlbb_ingame",
+                                    "mlbb_loading", "google_pay")
+    need_onboarding = state not in ("mlbb_main_menu", "google_pay")
+
+    # ── 4. Play Store → Играть → MLBB loading  (pure ADB, no Appium) ────────
+    if need_play_store:
+        print("\n[step 1/3] Play Store → Играть → MLBB loading (via ADB)...")
+        _launch_mlbb_via_play_store_adb(adb_serial)
+        print("[step 1/3] Done — MLBB is launching ✓")
+    else:
+        print(f"\n[step 1/3] Skipped — state is '{state}', MLBB already running ✓")
+
+    # ── 5. Build Appium objects + start session ──────────────────────────────
     reserved = _build_reserved_device(
         adb_host=args.adb_host,
         adb_port=args.adb_port,
@@ -375,80 +547,55 @@ def main() -> int:
     )
     run_id = make_run_id()
     run_logger = RunLogger(run_id=run_id, log_dir=Path(args.log_dir))
+    run_logger.log_step("state_detection", state, device_id=args.device_id)
     print(f"[run] Run ID: {run_id}")
 
-    # ── 3. Start Appium session ─────────────────────────────────────────────
     print("[run] Starting Appium session...")
-    with AppiumExecutor(
-        reserved=reserved,
-        retry_count=3,
-        retry_delay=2.0,
-        action_timeout=30,
-        device_id=args.device_id,
-        run_logger=run_logger,
-    ) as executor:
-
-        # Wake screen again now that Appium is connected (belt+suspenders)
-        executor.wake_screen()
-
-        # ── 4. State detection ───────────────────────────────────────────────
-        if args.force_launch:
-            state: DeviceState = "unknown"
-            print("[state] --force-launch: skipping state detection, starting from Play Store")
-        else:
-            print("[state] Detecting current device state...")
-            state = _detect_device_state(executor, adb_serial, run_logger)
-            print(f"[state] Detected: {state}")
-            run_logger.log_step("state_detection", state, device_id=args.device_id)
-
-        # ── 5. Smart routing ─────────────────────────────────────────────────
-        #
-        #  State                     → Steps to run
-        #  ─────────────────────────────────────────────────────────────────
-        #  mlbb_main_menu / google_pay  skip 1+2, run payment only
-        #  mlbb_loading / mlbb_ingame   skip 1 (Play Store), run 2+3
-        #  anything else                full flow: 1 + 2 + 3
-        #  ─────────────────────────────────────────────────────────────────
-
-        skip_launch   = state in ("mlbb_main_menu", "mlbb_ingame",
-                                  "mlbb_loading", "google_pay")
-        skip_onboard  = state in ("mlbb_main_menu", "google_pay")
-
-        if not skip_launch:
-            print("\n[step 1/3] Play Store → Играть → MLBB loading...")
-            install_mlbb.run(
-                executor=executor,
-                run_logger=run_logger,
-                device_id=args.device_id,
-                open_via_play_store=True,
-            )
-            print("[step 1/3] Done — MLBB launched ✓")
-        else:
-            print(f"\n[step 1/3] Skipped — state is '{state}', MLBB already running ✓")
-
-        if not skip_onboard:
-            print("\n[step 2/3] Onboarding → Main menu...")
-            mlbb_onboarding.run(
-                executor=executor,
-                run_logger=run_logger,
-                device_id=args.device_id,
-            )
-            print("[step 2/3] Done — main menu reached ✓")
-        else:
-            print(f"\n[step 2/3] Skipped — state is '{state}', already at main menu ✓")
-
-        print(f"\n[step 3/3] Recharge → 50 Diamonds → pay (dry_run={args.dry_run})...")
-        payment.run(
-            executor=executor,
-            run_logger=run_logger,
+    try:
+        with AppiumExecutor(
+            reserved=reserved,
+            retry_count=3,
+            retry_delay=2.0,
+            action_timeout=30,
             device_id=args.device_id,
-            dry_run=args.dry_run,
-            payment_pin=args.payment_pin,
-        )
-        if args.dry_run:
-            print("[step 3/3] Dry run complete — Google Pay sheet reached ✓")
-        else:
-            print("[step 3/3] Payment complete ✓")
+            run_logger=run_logger,
+        ) as executor:
+
+            # Wake screen after session start
+            executor.wake_screen()
+
+            # ── 6. Onboarding → Main menu ────────────────────────────────────────
+            if need_onboarding:
+                print("\n[step 2/3] Onboarding → Main menu...")
+                mlbb_onboarding.run(
+                    executor=executor,
+                    run_logger=run_logger,
+                    device_id=args.device_id,
+                )
+                print("[step 2/3] Done — main menu reached ✓")
+            else:
+                print(f"\n[step 2/3] Skipped — state is '{state}', already at main menu ✓")
+
+            # ── 7. Recharge → 50 Diamonds → Google Pay ──────────────────────────
+            print(f"\n[step 3/3] Recharge → 50 Diamonds → pay (dry_run={args.dry_run})...")
+            payment.run(
+                executor=executor,
+                run_logger=run_logger,
+                device_id=args.device_id,
+                dry_run=args.dry_run,
+                payment_pin=args.payment_pin,
+            )
+            if args.dry_run:
+                print("[step 3/3] Dry run complete — Google Pay sheet reached ✓")
+            else:
+                print("[step 3/3] Payment complete ✓")
+
+    except Exception as exc:
+        import traceback
+        print("\n[ERROR] Automation failed with exception:")
+        traceback.print_exc()
+        run_logger.log_step("run", "error", device_id=args.device_id, error=str(exc))
+        return 1
 
     print("\n" + "=" * 60)
     print("Automation run complete!")

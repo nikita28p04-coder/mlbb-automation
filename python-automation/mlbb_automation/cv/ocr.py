@@ -88,7 +88,7 @@ class OcrEngine:
 
         arr = self._preprocess(image)
         reader = self._get_reader()
-        raw = reader.readtext(arr, detail=1, paragraph=False)
+        raw = reader.readtext(arr, detail=1, paragraph=False, canvas_size=960)
 
         results: List[OcrResult] = []
         for points, text, confidence in raw:

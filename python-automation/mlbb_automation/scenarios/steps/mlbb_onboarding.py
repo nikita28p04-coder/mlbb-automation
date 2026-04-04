@@ -18,8 +18,9 @@ All taps go through executor.find_element() (3-stage: template → OCR → Appiu
 
 from __future__ import annotations
 
+import subprocess
 import time
-from typing import List
+from typing import List, Optional
 
 from ...actions.executor import AppiumExecutor
 from ...logging.logger import RunLogger, get_logger
@@ -105,49 +106,126 @@ def run(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _adb_foreground_pkg(adb_serial: str) -> str:
+    """
+    Return the package name currently in foreground via ADB.
+    Uses ``dumpsys activity activities`` — fast, no Appium needed.
+    Uses process-group kill so the call never hangs beyond the timeout.
+    Returns empty string on any failure.
+    """
+    import os, signal
+    cmd = ["adb", "-s", adb_serial, "shell", "dumpsys", "activity", "activities"]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid,
+        )
+        try:
+            stdout, _ = proc.communicate(timeout=10)
+            text = stdout.decode(errors="replace")
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+            proc.wait()
+            return ""
+    except Exception:
+        return ""
+
+    for line in text.splitlines():
+        if "mResumedActivity" in line or "ResumedActivity" in line:
+            for part in line.strip().split():
+                if "/" in part and "." in part:
+                    return part.split("/")[0]
+    return ""
+
+
 def _wait_for_loading(
     executor: AppiumExecutor,
     run_logger: RunLogger,
     device_id: str,
 ) -> None:
     """
-    Wait until MLBB finishes the initial loading/patch download phase.
+    Wait until MLBB finishes its initial loading/patch download phase.
 
-    The loading screen has a progress bar and the Moonton/MLBB logo.
-    We poll until loading signals disappear or main menu signals appear.
+    Strategy (fast path):
+      1. Poll ADB every 5 s to check MLBB is in foreground (no OCR cost).
+      2. Once MLBB is stable in foreground, take one screenshot and OCR only
+         the BOTTOM 40 % of the screen — that is where «Classic», «Ranked»,
+         «подготовка», etc. appear on the main menu.
+      3. If main-menu signals are found → done.
+      4. If not, tap any intro/skip button visible in that strip, then wait
+         another 10 s before the next OCR pass.
+
+    This avoids running full-screen OCR (which takes 3+ min on CPU) in a tight
+    polling loop.
     """
     from ...cv.ocr import OcrEngine
+    from ...scenarios.steps.install_mlbb import MLBB_PACKAGE
+
     ocr = OcrEngine()
+    adb_serial: Optional[str] = getattr(executor, "_adb_serial", None)
 
     logger.info("Waiting for MLBB initial load to complete", device_id=device_id)
-    _loading_signals = ("loading", "moonton", "downloading", "updating", "patch")
 
     deadline = time.monotonic() + _LOADING_TIMEOUT
-    last_screenshot_time = 0.0
+    last_ocr_time = 0.0          # time of last OCR pass
+    last_progress_shot = 0.0     # time of last progress screenshot
+    _OCR_INTERVAL = 12.0         # seconds between OCR passes
+    _ADB_INTERVAL = 5.0          # seconds between ADB foreground checks
 
     while time.monotonic() < deadline:
+        # ── 1. ADB foreground check (free / fast) ─────────────────────────
+        if adb_serial:
+            fg = _adb_foreground_pkg(adb_serial)
+            if fg and fg != MLBB_PACKAGE:
+                logger.info(
+                    "Waiting for MLBB foreground",
+                    current_fg=fg,
+                    device_id=device_id,
+                )
+                time.sleep(_ADB_INTERVAL)
+                continue
+
+        # ── 2. Throttle OCR passes ────────────────────────────────────────
+        now = time.monotonic()
+        if now - last_ocr_time < _OCR_INTERVAL:
+            time.sleep(2)
+            continue
+        last_ocr_time = now
+
+        # ── 3. Screenshot + cropped OCR (bottom 40 % only) ───────────────
         img = executor.screenshot()
-        results = ocr.read_region(img)
+        w, h = img.size
+        crop_top = int(h * 0.60)
+        bottom_strip = img.crop((0, crop_top, w, h))
+        results = ocr.read_region(bottom_strip)
         texts = " ".join(r.text.lower() for r in results)
 
-        # Main menu reached — loading complete
+        # Main menu reached
         if any(s in texts for s in _MAIN_MENU_SIGNALS):
             logger.info("Loading complete — main menu detected", device_id=device_id)
             run_logger.save_screenshot(img, label="loading_complete")
             return
 
-        # Log a screenshot every 60 seconds during long loads
-        now = time.monotonic()
-        if now - last_screenshot_time >= 60:
+        # Progress screenshot every 60 s
+        if now - last_progress_shot >= 60:
             run_logger.save_screenshot(img, label="loading_progress")
-            last_screenshot_time = now
+            last_progress_shot = now
 
-        # Any interactive screen that isn't loading — handle it
-        if not any(s in texts for s in _loading_signals):
-            # May be a tap-to-continue intro screen
-            _try_tap_through(executor, ocr, img, device_id)
+        logger.info(
+            "MLBB still loading",
+            bottom_texts=texts[:120],
+            device_id=device_id,
+        )
 
-        time.sleep(_POLL_INTERVAL)
+        # Tap-through any intro/skip button visible in the bottom strip
+        # Pass pre-computed results to avoid a second OCR call
+        _try_tap_through_results(executor, results, crop_offset_y=crop_top,
+                                 device_id=device_id)
 
     img = executor.screenshot()
     run_logger.save_screenshot(img, label="loading_timeout")
@@ -200,8 +278,8 @@ def _navigate_to_main_menu(
             time.sleep(2)
             continue
 
-        # ── Tap-through buttons ────────────────────────────────────────
-        tapped = _try_tap_through(executor, ocr, img, device_id)
+        # ── Tap-through buttons (reuse already-computed results) ──────
+        tapped = _try_tap_through_results(executor, results, device_id=device_id)
         if tapped:
             dismissed += 1
             last_action_time = time.monotonic()
@@ -227,14 +305,20 @@ def _navigate_to_main_menu(
     )
 
 
-def _try_tap_through(executor, ocr, img, device_id: str) -> bool:
+def _try_tap_through_results(
+    executor,
+    results: list,
+    crop_offset_y: int = 0,
+    device_id: str = "",
+) -> bool:
     """
-    Scan OCR results for a known skip/confirm button and tap it.
+    Scan pre-computed OCR results for a skip/confirm button and tap it.
+
+    ``crop_offset_y`` adjusts the y coordinate when results were computed on a
+    cropped image (the tap must target the full-screen coordinate).
 
     Returns True if a button was tapped, False otherwise.
     """
-    results = ocr.read_region(img)
-
     for result in results:
         word = result.text.lower().strip(".,!?:")
         if result.confidence < 0.5:
@@ -242,10 +326,24 @@ def _try_tap_through(executor, ocr, img, device_id: str) -> bool:
         if word in _GUARD_WORDS:
             continue
         if word in _TAP_THROUGH_BUTTONS or any(btn in word for btn in _TAP_THROUGH_BUTTONS):
-            executor.tap(result.cx, result.cy)
+            executor.tap(result.cx, result.cy + crop_offset_y)
             logger.info("Tapped onboarding button", button=result.text, device_id=device_id)
             return True
     return False
+
+
+def _try_tap_through(executor, ocr, img, device_id: str) -> bool:
+    """
+    Scan the full image via OCR for a skip/confirm button and tap it.
+
+    Kept for callers that have not yet been migrated to pass pre-computed
+    results.  Prefer ``_try_tap_through_results`` to avoid a redundant OCR
+    pass.
+
+    Returns True if a button was tapped, False otherwise.
+    """
+    results = ocr.read_region(img)
+    return _try_tap_through_results(executor, results, device_id=device_id)
 
 
 def _select_server(executor, ocr, img, run_logger, device_id: str) -> None:
