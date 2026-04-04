@@ -41,11 +41,22 @@ from ...logging.logger import RunLogger, get_logger
 logger = get_logger(__name__)
 
 # OCR signals for each state
-_SHOP_SIGNALS = ("shop", "магазин")
+_SHOP_SIGNALS = (
+    "shop", "магазин",
+    # Confirmed shop-page texts (Samsung Galaxy A13, Russian locale):
+    "постоянный лимит",   # "Permanent limit" badge shown in shop
+    "новичок",            # "Beginner" section header in shop
+    "скидки",             # "Discounts" section in shop
+    "пополните",          # "Top up" CTA shown in shop
+    "эксклюзивный",       # "Exclusive" product label
+    "фрагменты",          # "Fragments" shop category
+)
 _DIAMONDS_SIGNALS = (
     "diamonds", "алмазы", "кристаллы", "crystals",
     "top up", "topup", "recharge",
     "пополнить", "пополнение",
+    # Additional RECHARGE screen signals (confirmed from OCR):
+    "50 diamonds", "0,99", "0.99", "86 алмазов", "86 diamonds",
 )
 _BUY_SIGNALS = ("buy", "purchase", "купить", "приобрести")
 _GOOGLE_PAY_SIGNALS = (
@@ -109,7 +120,7 @@ _SMALL_PACK_SIGNALS = (
 )
 
 # Timeouts
-_SHOP_TIMEOUT = 30
+_SHOP_TIMEOUT = 90   # Increased: OCR takes ~10s/pass, shop animation ~5s
 _PAYMENT_SHEET_TIMEOUT = 45  # Google Play billing sheet loads from servers — needs extra time
 _AUTH_TIMEOUT = 20      # seconds to wait for PIN/biometric prompt to appear or clear
 _RESULT_TIMEOUT = 60
@@ -284,26 +295,45 @@ def _open_recharge_screen(
 
     _RECHARGE_CONFIRM_SIGNALS = ("recharge", "diamonds", "50 diamonds", "алмазы", "пополнение", "кристаллы")
 
-    # ── Stage B: OCR on already-captured img — look for "+" in right half ───
+    # ── Stage B: OCR on already-captured img — look for recharge shortcut ───
     # (Stage A UiAutomator2 find_element removed — it took a second screenshot
     # which caused Knox to kill the UiAutomator2 server.)
+    #
+    # Samsung Galaxy A13 main menu confirmed OCR layout (2408×1080 landscape):
+    #   [1737, 60]  '264'        — diamond/crystal counter value
+    #   [1145, 85]  'Подарок'    — gift/notification button
+    #   [1143,122]  'Пополнения' — RECHARGE shortcut button (OCR may read as 'Юполнения')
+    #   [ 125,351]  'Магазин'    — shop button (fallback)
+    #
+    # We look for text that contains the recharge button signal substring OR a "+"
+    # anywhere in the center-right of the screen (cx > 35% of width).
+    _RECHARGE_BTN_SUBSTRINGS = ("полнени", "пополн", "recharge", "+", "topup", "top-up")
     shortcut_tapped = False
     results = ocr.read_region(img)
-    for result in results:
-        if result.text.strip() == "+" and result.cx > img_w * 0.55:
-            logger.info("OCR found '+' shortcut", x=result.cx, y=result.cy, device_id=device_id)
+    logger.info(
+        "Main menu OCR results",
+        count=len(results),
+        texts=[(r.cx, r.cy, r.text) for r in sorted(results, key=lambda x: x.cy)],
+        device_id=device_id,
+    )
+    for result in sorted(results, key=lambda r: r.confidence, reverse=True):
+        text_lower = result.text.lower()
+        if (any(s in text_lower for s in _RECHARGE_BTN_SUBSTRINGS)
+                and result.cx > img_w * 0.35):
+            logger.info("OCR found recharge shortcut", text=result.text,
+                        x=result.cx, y=result.cy, device_id=device_id)
             executor.adb_tap(result.cx, result.cy)
             shortcut_tapped = True
-            logger.info("ADB-tapped '+' shortcut via OCR", x=result.cx, y=result.cy, device_id=device_id)
             break
 
     # ── Stage C: heuristic ADB tap at known coordinates ──────────────────────
-    # Confirmed layout for Samsung Galaxy A13 (2408×1080 landscape, MLBB):
-    #   Crystal/diamond "+" button: ~92% width, ~10% height
+    # Confirmed from OCR analysis of Samsung Galaxy A13 (2408×1080 landscape):
+    #   "Пополнения" (Recharge) button is at approximately (1143, 122).
+    #   This is the direct recharge shortcut next to the diamond counter.
     if not shortcut_tapped:
-        cx = int(img_w * 0.92)
-        cy = int(img_h * 0.10)
-        logger.info("Heuristic ADB tap '+' at coords", x=cx, y=cy,
+        cx = int(img_w * 0.475)   # ~1143 px for 2408 wide
+        cy = int(img_h * 0.113)   # ~122 px for 1080 tall
+        logger.info("Heuristic ADB tap 'Пополнения' at coords", x=cx, y=cy,
                     img_w=img_w, img_h=img_h, device_id=device_id)
         executor.adb_tap(cx, cy)
         shortcut_tapped = True

@@ -461,7 +461,6 @@ def _build_reserved_device(
         "appium:uiautomator2ServerInstallTimeout": 120000,
         "appium:uiautomator2ServerLaunchTimeout": 120000,
         "appium:settings[waitForSelectorTimeout]": 5000,
-        "appium:skipServerInstallation": True,
         "appium:ignoreHiddenApiPolicyError": True,
         "appium:skipDeviceInitialization": True,
     }
