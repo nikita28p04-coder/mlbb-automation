@@ -42,7 +42,11 @@ logger = get_logger(__name__)
 
 # OCR signals for each state
 _SHOP_SIGNALS = ("shop", "магазин")
-_DIAMONDS_SIGNALS = ("diamonds", "top up", "topup", "recharge", "алмазы", "пополнить")
+_DIAMONDS_SIGNALS = (
+    "diamonds", "алмазы", "кристаллы", "crystals",
+    "top up", "topup", "recharge",
+    "пополнить", "пополнение",
+)
 _BUY_SIGNALS = ("buy", "purchase", "купить", "приобрести")
 _GOOGLE_PAY_SIGNALS = ("google pay", "pay with google", "google pay button")
 
@@ -78,13 +82,20 @@ _TEMPLATE_STRONG_THRESHOLD = 0.90  # template alone (no OCR required) if >= this
 
 # Smallest-package heuristics — these text patterns usually appear near cheap packs
 _SMALL_PACK_SIGNALS = (
-    "86",    # 86 diamonds (~$0.99)
-    "89",    # sometimes 89
+    "86",    # 86 diamonds / crystals (~$0.99 / ~89 ₽)
+    "89",    # sometimes 89 diamonds; also "89 ₽" for Russian locale
     "0.99",
     "1.09",
     "₱",    # Philippine peso (often lowest)
     "0,99",
     "$0",
+    "99 ₽",   # Russian ruble — cheapest pack is often 99 ₽
+    "99₽",
+    "89 ₽",
+    "89₽",
+    "109 ₽",
+    "109₽",
+    "руб",   # generic ruble abbreviation next to any small price
 )
 
 # Timeouts
@@ -286,7 +297,10 @@ def _open_diamonds_section(
         return
 
     # Try to find and tap Diamonds tab — try each localized label
-    _diamond_labels = ("Diamonds", "Алмазы", "Top Up", "Пополнить", "Recharge")
+    _diamond_labels = (
+        "Diamonds", "Алмазы", "Кристаллы", "Crystals",
+        "Top Up", "Пополнить", "Пополнение", "Recharge",
+    )
     tapped_diamonds = False
     for label in _diamond_labels:
         try:

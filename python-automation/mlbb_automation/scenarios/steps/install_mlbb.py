@@ -1,12 +1,16 @@
 """
 Step: Install Mobile Legends: Bang Bang from Google Play Store.
 
-Flow:
-  1. If MLBB is already installed → skip (idempotent)
-  2. Open Play Store via market:// intent
-  3. Tap "Install" button and wait for download + install to complete
-  4. Tap "Open" when it appears, OR launch app by package name
-  5. Wait for MLBB loading screen to confirm launch
+Flow (default — open_via_play_store=True):
+  1. Always open Play Store MLBB page (even if already installed)
+  2. If "Install" is visible → install, wait, then tap "Play"/"Open"
+  3. If "Play"/"Open"/"Играть" is already visible → tap it directly
+  4. Wait for MLBB loading screen to confirm launch
+
+Flow (open_via_play_store=False, legacy):
+  1. If MLBB is already installed → skip install
+  2. Otherwise open Play Store → Install → wait → Open
+  3. Wait for MLBB loading screen
 """
 
 from __future__ import annotations
@@ -23,13 +27,14 @@ PLAY_STORE_PACKAGE = "com.android.vending"
 
 # UI text labels — tried in order during find_element calls (EN then RU)
 _INSTALL_LABELS = ("Install", "Установить")
-_OPEN_LABELS = ("Open", "Открыть")
+# "Play" / "Играть" appear on Play Store when the app is already installed and ready to launch
+_OPEN_LABELS = ("Play", "Open", "Играть", "Открыть", "Запустить")
 
 # OCR signals for state detection (lowercase)
 _INSTALL_SIGNALS = ("install", "установить")
 _INSTALLING_SIGNALS = ("installing", "downloading", "загрузка", "установка", "pending")
-_OPEN_SIGNALS = ("open", "открыть")
-_ALREADY_INSTALLED_SIGNALS = ("open", "uninstall", "update", "открыть", "удалить")
+_OPEN_SIGNALS = ("play", "open", "играть", "открыть", "запустить")
+_ALREADY_INSTALLED_SIGNALS = ("play", "open", "uninstall", "update", "играть", "открыть", "удалить")
 
 # Timeouts
 _INSTALL_TIMEOUT = 600  # 10 minutes — MLBB is a large download
@@ -45,33 +50,58 @@ def run(
     executor: AppiumExecutor,
     run_logger: RunLogger,
     device_id: str = "",
+    open_via_play_store: bool = True,
 ) -> None:
     """
-    Open Google Play Store and install MLBB.
+    Open Google Play Store and install / launch MLBB.
 
     Args:
-        executor:   Active AppiumExecutor session.
-        run_logger: RunLogger for this automation run.
-        device_id:  Device ID for log context.
+        executor:             Active AppiumExecutor session.
+        run_logger:           RunLogger for this automation run.
+        device_id:            Device ID for log context.
+        open_via_play_store:  When True (default), always navigate to the Play
+                              Store MLBB page and tap "Play"/"Играть".
+                              This is correct for the simplified scenario where
+                              the app is already installed.
+                              When False (legacy), skip Play Store if the app is
+                              already installed and launch directly by package.
     """
     run_logger.log_step("install_mlbb", "started", device_id=device_id)
-    logger.info("install_mlbb starting", device_id=device_id)
+    logger.info("install_mlbb starting", device_id=device_id, open_via_play_store=open_via_play_store)
 
-    # Step 1: Check if already installed
-    if executor.is_app_installed(MLBB_PACKAGE):
-        logger.info("MLBB already installed — skipping install", device_id=device_id)
-        run_logger.log_step("install_mlbb", "already_installed", device_id=device_id)
-    else:
-        # Step 2: Open Play Store via market:// intent
+    if open_via_play_store:
+        # Always open Play Store — works whether app is installed or not
         _open_play_store(executor, run_logger, device_id)
 
-        # Step 3: Tap Install and wait
-        _tap_install_and_wait(executor, run_logger, device_id)
+        # Check what Play Store is showing
+        from ...cv.ocr import OcrEngine
+        ocr = OcrEngine()
+        img = executor.screenshot()
+        results = ocr.read_region(img)
+        texts = " ".join(r.text.lower() for r in results)
 
-    # Step 4: Launch MLBB (tap Open or start by package)
-    _launch_mlbb(executor, run_logger, device_id)
+        already_ready = any(s in texts for s in _OPEN_SIGNALS)
+        needs_install = any(s in texts for s in _INSTALL_SIGNALS) and not already_ready
 
-    # Step 5: Wait for the loading screen
+        if needs_install:
+            logger.info("Play Store shows Install — installing now", device_id=device_id)
+            _tap_install_and_wait(executor, run_logger, device_id)
+
+        # Tap Play / Open / Играть
+        _launch_from_play_store(executor, run_logger, device_id)
+
+    else:
+        # Legacy: skip Play Store if already installed
+        if executor.is_app_installed(MLBB_PACKAGE):
+            logger.info("MLBB already installed — skipping install", device_id=device_id)
+            run_logger.log_step("install_mlbb", "already_installed", device_id=device_id)
+        else:
+            _open_play_store(executor, run_logger, device_id)
+            _tap_install_and_wait(executor, run_logger, device_id)
+
+        _launch_mlbb(executor, run_logger, device_id)
+
+    # Wait for the loading screen
     _wait_for_mlbb_loading(executor, run_logger, device_id)
 
     run_logger.log_step("install_mlbb", "ok", device_id=device_id)
@@ -98,6 +128,75 @@ def _open_play_store(
 
     img = executor.screenshot()
     run_logger.save_screenshot(img, label="play_store_mlbb")
+
+
+def _launch_from_play_store(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+) -> None:
+    """
+    Tap "Play" / "Играть" / "Open" / "Открыть" on the Play Store MLBB page.
+
+    Used in the simplified scenario when the app is pre-installed.
+    Tries UiAutomator2 element search first; falls back to ADB subprocess tap
+    at known coordinates if the element search fails.
+    """
+    logger.info("Tapping Play/Open on Play Store", device_id=device_id)
+    run_logger.log_step("install_mlbb", "tapping_play", device_id=device_id)
+
+    # Stage A: UiAutomator2 element search
+    for label in _OPEN_LABELS:
+        try:
+            x, y = executor.find_element(label, retries=3)
+            executor.tap(x, y)
+            logger.info("Tapped Play/Open via UiAutomator2", label=label, device_id=device_id)
+            time.sleep(3)
+            img = executor.screenshot()
+            run_logger.save_screenshot(img, label="play_tapped")
+            return
+        except RuntimeError:
+            continue
+
+    # Stage B: OCR — find the button position from text bounding boxes
+    logger.info("UiAutomator2 failed — trying OCR tap", device_id=device_id)
+    from ...cv.ocr import OcrEngine
+    ocr = OcrEngine()
+    img = executor.screenshot()
+    results = ocr.read_region(img)
+    for result in results:
+        if any(s in result.text.lower() for s in _OPEN_SIGNALS):
+            logger.info("Found Play/Open via OCR", text=result.text, device_id=device_id)
+            executor.tap(result.cx, result.cy)
+            time.sleep(3)
+            img = executor.screenshot()
+            run_logger.save_screenshot(img, label="play_tapped_ocr")
+            return
+
+    # Stage C: ADB subprocess tap — Play Store "Играть" button is at roughly
+    # center-top on Samsung Galaxy A13 (1080×2408) — try center of screen,
+    # upper half where CTA buttons typically live.
+    logger.warning(
+        "OCR tap failed — falling back to ADB tap at heuristic coordinates",
+        device_id=device_id,
+    )
+    import subprocess
+    try:
+        size = executor.get_screen_size()
+        cx = size[0] // 2       # horizontal center
+        cy = int(size[1] * 0.28)  # ~28% from top — Play Store CTA button zone
+        logger.info("ADB tap at heuristic coords", x=cx, y=cy, device_id=device_id)
+        subprocess.run(["adb", "shell", "input", "tap", str(cx), str(cy)], timeout=10)
+        time.sleep(3)
+        img = executor.screenshot()
+        run_logger.save_screenshot(img, label="play_tapped_adb")
+        return
+    except Exception as exc:
+        logger.error("ADB tap failed", error=str(exc), device_id=device_id)
+
+    raise StepError(
+        "Could not tap Play/Open button on Play Store in any supported language or fallback method"
+    )
 
 
 def _tap_install_and_wait(
