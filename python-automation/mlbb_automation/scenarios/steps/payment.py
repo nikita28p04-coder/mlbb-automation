@@ -48,7 +48,17 @@ _DIAMONDS_SIGNALS = (
     "пополнить", "пополнение",
 )
 _BUY_SIGNALS = ("buy", "purchase", "купить", "приобрести")
-_GOOGLE_PAY_SIGNALS = ("google pay", "pay with google", "google pay button")
+_GOOGLE_PAY_SIGNALS = (
+    # Real device (Samsung Galaxy A13, Russian locale) shows "Google Play" billing sheet,
+    # NOT "Google Pay". Sheet header: "Google Play", product: "50 Diamonds", button: "Купить"
+    "google play",
+    # Keep Google Pay variants as fallback for other devices / payment methods
+    "google pay",
+    "pay with google",
+    # Secondary signals visible on the sheet
+    "топ продаж",                    # badge next to product name in Russian locale
+    "mobile legends: bang bang",     # product subtitle on Google Play sheet
+)
 
 # Payment-specific OCR success phrases (must contain payment context words).
 # Generic words like "success" are intentionally excluded to avoid false positives
@@ -100,7 +110,7 @@ _SMALL_PACK_SIGNALS = (
 
 # Timeouts
 _SHOP_TIMEOUT = 30
-_PAYMENT_SHEET_TIMEOUT = 30
+_PAYMENT_SHEET_TIMEOUT = 45  # Google Play billing sheet loads from servers — needs extra time
 _AUTH_TIMEOUT = 20      # seconds to wait for PIN/biometric prompt to appear or clear
 _RESULT_TIMEOUT = 60
 _POLL_INTERVAL = 2.0
@@ -161,32 +171,37 @@ def run(
     payment_pin: Optional[str] = None,
 ) -> None:
     """
-    Open MLBB Shop → Diamonds → smallest package → Google Pay → confirm.
+    Navigate to RECHARGE screen → select 50 Diamonds ($0.99) → Google Play sheet → "Купить".
+
+    Navigation (Samsung Galaxy A13, Russian locale, confirmed from real screenshots):
+      Main menu "+" button → RECHARGE screen → tap "50 Diamonds" (0,99 $) →
+      Google Play billing sheet → tap "Купить" (blue button).
+
+    Fallback navigation:
+      "Магазин" → Diamonds/Recharge tab → package → Google Play sheet.
 
     Args:
         executor:     Active AppiumExecutor session.
         run_logger:   RunLogger for this automation run.
         device_id:    Device ID for log context.
         dry_run:      If True, navigate to payment screen but skip final tap.
-        payment_pin:  Device unlock PIN for Google Pay authentication.
-                      If None, biometric/PIN prompts are cancelled.
+        payment_pin:  Device unlock PIN (not required for Mastercard saved in Google Play).
     """
     run_logger.log_step("payment", "started", device_id=device_id, dry_run=dry_run)
     logger.info("payment step starting", device_id=device_id, dry_run=dry_run)
 
-    # Step 1: Navigate from main menu to Shop
-    _open_shop(executor, run_logger, device_id)
+    # Step 1: Navigate from main menu to RECHARGE screen
+    # Fast path: tap "+" next to crystal counter → RECHARGE opens directly
+    # Fallback: "Магазин" → Diamonds/Recharge tab
+    _open_recharge_screen(executor, run_logger, device_id)
 
-    # Step 2: Navigate to Diamonds / Top-Up
-    _open_diamonds_section(executor, run_logger, device_id)
-
-    # Step 3: Select smallest package
+    # Step 2: Select smallest package (50 Diamonds, 0,99 $)
     _select_smallest_package(executor, run_logger, device_id)
 
-    # Step 4: Tap "Buy" — this navigates into the Google Pay sheet
+    # Step 3: Tap "Buy" on the package — Google Play billing sheet slides up
     _tap_buy(executor, run_logger, device_id)
 
-    # Step 5: Handle Google Pay sheet (with context switching)
+    # Step 4: Handle Google Play billing sheet — tap "Купить" (blue button)
     # dry_run stops here — after reaching the sheet — without confirming payment
     _handle_google_pay(executor, run_logger, device_id, dry_run=dry_run)
 
@@ -223,12 +238,94 @@ def run(
 # Navigation helpers
 # ---------------------------------------------------------------------------
 
+def _open_recharge_screen(
+    executor: AppiumExecutor,
+    run_logger: RunLogger,
+    device_id: str,
+) -> None:
+    """
+    Navigate from MLBB main menu to the RECHARGE / Diamonds screen.
+
+    Fast path (confirmed on Samsung Galaxy A13, Russian locale):
+      Tap the "+" button next to the crystal counter in the top-right → RECHARGE
+      screen opens directly, no need to go through "Магазин".
+
+    Fallback:
+      Tap "Магазин" → navigate to Diamonds/Recharge tab (legacy path).
+    """
+    run_logger.log_step("payment", "open_recharge", device_id=device_id)
+    logger.info("Navigating to RECHARGE screen", device_id=device_id)
+
+    from ...cv.ocr import OcrEngine
+    import subprocess
+    ocr = OcrEngine()
+
+    img = executor.screenshot()
+    run_logger.save_screenshot(img, label="before_recharge_nav")
+
+    _RECHARGE_CONFIRM_SIGNALS = ("recharge", "diamonds", "50 diamonds", "алмазы", "пополнение")
+
+    # ── Stage A: UiAutomator2 find "+" element ──────────────────────────────
+    shortcut_tapped = False
+    try:
+        x, y = executor.find_element("+", retries=2)
+        executor.tap(x, y)
+        shortcut_tapped = True
+        logger.info("Tapped '+' shortcut via UiAutomator2", device_id=device_id)
+    except RuntimeError:
+        pass
+
+    # ── Stage B: OCR — look for "+" in the right half of the screen ─────────
+    if not shortcut_tapped:
+        results = ocr.read_region(img)
+        img_w = img.width if hasattr(img, "width") else 1920
+        for result in results:
+            if result.text.strip() == "+" and result.cx > img_w * 0.55:
+                executor.tap(result.cx, result.cy)
+                shortcut_tapped = True
+                logger.info("Tapped '+' via OCR", x=result.cx, y=result.cy, device_id=device_id)
+                break
+
+    # ── Stage C: ADB tap at known coords (landscape Samsung Galaxy A13) ─────
+    if not shortcut_tapped:
+        size = executor.get_screen_size()
+        # In landscape MLBB the crystal "+" is at ~79% width, ~6% height
+        cx = int(size[0] * 0.79)
+        cy = int(size[1] * 0.06)
+        logger.info("ADB tap '+' at heuristic coords", x=cx, y=cy, device_id=device_id)
+        try:
+            subprocess.run(["adb", "shell", "input", "tap", str(cx), str(cy)], timeout=10)
+            shortcut_tapped = True
+        except Exception as exc:
+            logger.warning("ADB tap failed", error=str(exc), device_id=device_id)
+
+    if shortcut_tapped:
+        time.sleep(2)
+        img = executor.screenshot()
+        results = ocr.read_region(img)
+        texts = " ".join(r.text.lower() for r in results)
+        if any(s in texts for s in _RECHARGE_CONFIRM_SIGNALS):
+            run_logger.save_screenshot(img, label="recharge_via_shortcut")
+            logger.info("RECHARGE screen opened via '+' shortcut", device_id=device_id)
+            return
+        logger.info(
+            "'+' shortcut did not land on RECHARGE — falling back to Магазин path",
+            texts_sample=texts[:100],
+            device_id=device_id,
+        )
+
+    # ── Fallback: Магазин → Diamonds tab ────────────────────────────────────
+    logger.info("Using fallback: Магазин → Diamonds/Recharge tab", device_id=device_id)
+    _open_shop(executor, run_logger, device_id)
+    _open_diamonds_section(executor, run_logger, device_id)
+
+
 def _open_shop(
     executor: AppiumExecutor,
     run_logger: RunLogger,
     device_id: str,
 ) -> None:
-    """Navigate to the MLBB Shop from the main menu."""
+    """Navigate to the MLBB Shop from the main menu (legacy / fallback path)."""
     logger.info("Opening MLBB Shop", device_id=device_id)
     run_logger.log_step("payment", "open_shop", device_id=device_id)
 
@@ -477,11 +574,14 @@ def _try_confirm_payment_native(
     device_id: str,
 ) -> bool:
     """
-    Try to confirm the Google Pay payment in the NATIVE_APP context.
+    Try to confirm the Google Play / Google Pay sheet in the NATIVE_APP context.
 
-    Returns True if the Pay button was found and tapped.
+    On real Samsung Galaxy A13 (Russian locale) the button text is "Купить".
+    Returns True if the button was found and tapped.
     """
-    _confirm_labels = ("pay", "confirm", "оплатить", "подтвердить")
+    # "Купить" is the actual button text on Russian Google Play billing sheet.
+    # Keep others as fallback for non-Russian locales / Google Pay balance users.
+    _confirm_labels = ("Купить", "купить", "Pay", "pay", "confirm", "оплатить", "подтвердить")
 
     logger.info("Trying to confirm payment in NATIVE_APP context", device_id=device_id)
     try:
@@ -520,7 +620,7 @@ def _try_confirm_payment_webview(
     """
     logger.info("Probing WEBVIEW contexts for payment button", device_id=device_id)
 
-    _confirm_labels = ("pay", "confirm", "оплатить", "подтвердить")
+    _confirm_labels = ("Купить", "купить", "Pay", "pay", "confirm", "оплатить", "подтвердить")
 
     try:
         contexts = executor.get_contexts()

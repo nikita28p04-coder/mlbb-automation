@@ -323,7 +323,12 @@ def _wait_for_mlbb_loading(
             return
 
         # Also check if we're already at main menu (fast device)
-        if "classic" in texts or "profile" in texts or "shop" in texts:
+        # Russian signals from real Samsung Galaxy A13 screenshots
+        _fast_menu_signals = (
+            "classic", "profile", "shop", "battle",
+            "подготовка", "герои", "сумка", "магазин", "обычный",
+        )
+        if any(s in texts for s in _fast_menu_signals):
             logger.info("MLBB already at main menu", device_id=device_id)
             run_logger.save_screenshot(img, label="mlbb_main_menu_fast")
             return

@@ -31,8 +31,14 @@ _LOADING_TIMEOUT = 300   # MLBB can take up to 5 min to load on first launch
 _MAIN_MENU_TIMEOUT = 120
 _POLL_INTERVAL = 3.0
 
-# OCR text that indicates we have reached the main menu
-_MAIN_MENU_SIGNALS = ("classic", "ranked", "brawl", "shop", "profile", "battle")
+# OCR text that indicates we have reached the main menu.
+# Includes both English and Russian (device locale) variants confirmed from real screenshots.
+_MAIN_MENU_SIGNALS = (
+    # English
+    "classic", "ranked", "brawl", "shop", "profile", "battle",
+    # Russian — from real Samsung Galaxy A13 screenshots
+    "подготовка", "герои", "сумка", "обычный", "магазин",
+)
 
 # Screens to tap-through during onboarding
 _TAP_THROUGH_BUTTONS = (
