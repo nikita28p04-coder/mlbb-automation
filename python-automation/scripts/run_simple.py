@@ -49,7 +49,7 @@ if str(_PACKAGE_ROOT) not in sys.path:
 
 from mlbb_automation.device_farm.base import DeviceInfo, ReservedDevice
 from mlbb_automation.actions.executor import AppiumExecutor
-from mlbb_automation.logging.logger import RunLogger, get_logger
+from mlbb_automation.logging.logger import RunLogger, get_logger, make_run_id
 from mlbb_automation.scenarios.steps import install_mlbb, mlbb_onboarding, payment
 
 logger = get_logger(__name__)
@@ -187,7 +187,9 @@ def _build_reserved_device(
         "appium:uiautomator2ServerInstallTimeout": 120000,
         "appium:uiautomator2ServerLaunchTimeout": 120000,
         "appium:settings[waitForSelectorTimeout]": 5000,
-        "appium:skipServerInstallation": False,
+        "appium:skipServerInstallation": True,
+        "appium:ignoreHiddenApiPolicyError": True,
+        "appium:skipDeviceInitialization": True,
     }
     return ReservedDevice(
         device_info=device_info,
@@ -226,10 +228,12 @@ def main() -> int:
         appium_url=args.appium_url,
     )
 
+    run_id = make_run_id()
     run_logger = RunLogger(
+        run_id=run_id,
         log_dir=Path(args.log_dir),
-        device_id=args.device_id,
     )
+    print(f"[run] Run ID: {run_id}")
 
     # 3. Run the scenario
     print("[run] Starting Appium session...")

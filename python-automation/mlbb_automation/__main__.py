@@ -20,6 +20,7 @@ import click
 
 from .config.settings import load_settings
 from .logging.logger import get_logger, make_run_id
+from .scenarios.steps.install_mlbb import MLBB_PACKAGE
 
 logger = get_logger(__name__)
 
@@ -365,7 +366,7 @@ def run(
             # RecoveryManager: freeze detection + app relaunch
             recovery = RecoveryManager(
                 executor=executor,
-                app_package="com.mobile.legends",
+                app_package=MLBB_PACKAGE,
             )
             recovery.start_watchdog()
 

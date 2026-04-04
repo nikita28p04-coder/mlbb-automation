@@ -22,7 +22,7 @@ from ...logging.logger import RunLogger, get_logger
 
 logger = get_logger(__name__)
 
-MLBB_PACKAGE = "com.mobile.legends"
+MLBB_PACKAGE = "com.mobile.legends.usa"  # actual package on Samsung Galaxy A13 (Selectel farm)
 PLAY_STORE_PACKAGE = "com.android.vending"
 
 # UI text labels — tried in order during find_element calls (EN then RU)
@@ -165,8 +165,10 @@ def _launch_from_play_store(
     img = executor.screenshot()
     results = ocr.read_region(img)
     for result in results:
-        if any(s in result.text.lower() for s in _OPEN_SIGNALS):
-            logger.info("Found Play/Open via OCR", text=result.text, device_id=device_id)
+        word = result.text.lower().strip(".,!?:")
+        # Exact match only — avoid matching "play" inside "Google Play" nav bar
+        if word in _OPEN_SIGNALS:
+            logger.info("Found Play/Open via OCR (exact)", text=result.text, device_id=device_id)
             executor.tap(result.cx, result.cy)
             time.sleep(3)
             img = executor.screenshot()
