@@ -355,6 +355,53 @@ class AppiumExecutor:
         self._retry(lambda: self.driver.press_keycode(keycode))
         self._record_action("press_key", keycode=keycode)
 
+    def wake_screen(self) -> None:
+        """
+        Wake the device screen and dismiss the lockscreen if present.
+
+        Sends KEYCODE_WAKEUP (224) to turn on the screen, then
+        KEYCODE_MENU (82) which also dismisses a swipe-lockscreen on
+        Android 14 without a PIN.  Safe to call even if screen is
+        already on (the key presses are no-ops in that case).
+        """
+        try:
+            self._retry(lambda: self.driver.press_keycode(224))  # WAKEUP
+        except Exception:
+            pass
+        time.sleep(0.5)
+        try:
+            self._retry(lambda: self.driver.press_keycode(82))   # MENU / unlock
+        except Exception:
+            pass
+        time.sleep(0.3)
+        self._record_action("wake_screen")
+
+    def get_current_package(self) -> str:
+        """
+        Return the package name of the currently foregrounded app.
+
+        Tries ``mobile: activeAppInfo`` first (Appium 2 / UiAutomator2),
+        then falls back to the ``current_package`` driver attribute.
+
+        Returns an empty string on any error.
+        """
+        try:
+            info = self._retry(
+                lambda: self.driver.execute_script("mobile: activeAppInfo", {})
+            )
+            if isinstance(info, dict):
+                return (
+                    info.get("packageName")
+                    or info.get("bundleId")
+                    or ""
+                )
+        except Exception:
+            pass
+        try:
+            return self._retry(lambda: self.driver.current_package) or ""
+        except Exception:
+            return ""
+
     # ------------------------------------------------------------------
     # Text input
     # ------------------------------------------------------------------
