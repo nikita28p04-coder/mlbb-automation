@@ -47,3 +47,18 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# MLBB Automation — secrets (NEVER commit real config)
+python-automation/config.yaml
+
+# MLBB Automation — run artifacts (logs, screenshots)
+python-automation/run_artifacts/
